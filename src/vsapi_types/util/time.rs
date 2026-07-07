@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Convert a visa expiration timestamp (seconds since UNIX epoch) to SystemTime.
+/// Convert a visa expiration timestamp (milliseconds since UNIX epoch, which is
+/// how the visa service formats it) to SystemTime.
 pub fn visa_expiration_timestamp_to_system_time(timestamp: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(timestamp)
+    UNIX_EPOCH + Duration::from_millis(timestamp)
 }

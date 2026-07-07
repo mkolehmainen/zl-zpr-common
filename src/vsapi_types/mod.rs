@@ -40,7 +40,7 @@ pub use vsnet::SockAddr;
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     // Helper function to create a test ServiceDescriptor
     fn create_test_service_descriptor() -> ServiceDescriptor {
@@ -178,5 +178,26 @@ mod tests {
         let socket_addr = descriptor.get_socket_addr();
         assert!(socket_addr.is_some());
         assert_eq!(socket_addr.unwrap().port(), 8080);
+    }
+
+    #[test]
+    fn test_visa_expiration_round_trip() {
+        // A visa's expiry must survive get_expiration_timestamp -> reader without inflation.
+        // 1.7B seconds since epoch: as-millis misread as seconds inflates it ~1000x.
+        let expires = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let visa = Visa::new(
+            1,
+            0,
+            expires,
+            IpAddr::from([10, 0, 0, 1]),
+            IpAddr::from([10, 0, 0, 2]),
+            DockPepType::TCP(TcpUdpPep::new(1000, 2000, EndpointT::Any)),
+            KeySet::new(&[0u8; 32], &[0u8; 32]),
+            None,
+        );
+
+        let round_tripped =
+            visa_expiration_timestamp_to_system_time(visa.get_expiration_timestamp());
+        assert_eq!(round_tripped, expires);
     }
 }
