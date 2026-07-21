@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 pub const ATTR_DOMAIN_SERVICE: &str = "service";
 pub const ATTR_DOMAIN_USER: &str = "user";
-pub const ATTR_DOMAIN_ENDPOINT: &str = "endpoint";
+pub const ATTR_DOMAIN_DEVICE: &str = "device";
 pub const ATTR_DOMAIN_LINK: &str = "link";
 pub const ATTR_DOMAIN_ZPR_INTERNAL: &str = "zpr";
 
@@ -27,7 +27,7 @@ pub struct Attribute {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum AttrDomain {
     Unspecified,
-    Endpoint,
+    Device,
     User,
     Service,
     Link,
@@ -37,7 +37,7 @@ pub enum AttrDomain {
 impl fmt::Display for AttrDomain {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            AttrDomain::Endpoint => write!(f, "{}", ATTR_DOMAIN_ENDPOINT),
+            AttrDomain::Device => write!(f, "{}", ATTR_DOMAIN_DEVICE),
             AttrDomain::User => write!(f, "{}", ATTR_DOMAIN_USER),
             AttrDomain::Service => write!(f, "{}", ATTR_DOMAIN_SERVICE),
             AttrDomain::Link => write!(f, "{}", ATTR_DOMAIN_LINK),
@@ -356,8 +356,8 @@ impl Attribute {
     /// Parse off one the ZPR domains from the key.  Does not work with ZPR internal domain.
     /// Returns `(<domain>, <rest>)` from given key.
     pub fn parse_domain(key: &str) -> Result<(AttrDomain, String), AttributeError> {
-        if let Some(renamed) = key.strip_prefix(&format!("{}.", ATTR_DOMAIN_ENDPOINT)) {
-            Ok((AttrDomain::Endpoint, renamed.to_string()))
+        if let Some(renamed) = key.strip_prefix(&format!("{}.", ATTR_DOMAIN_DEVICE)) {
+            Ok((AttrDomain::Device, renamed.to_string()))
         } else if let Some(renamed) = key.strip_prefix(&format!("{}.", ATTR_DOMAIN_USER)) {
             Ok((AttrDomain::User, renamed.to_string()))
         } else if let Some(renamed) = key.strip_prefix(&format!("{}.", ATTR_DOMAIN_SERVICE)) {
@@ -465,16 +465,16 @@ mod test {
 
     #[test]
     fn test_attributes_tag() {
-        let a = Attribute::tag("endpoint.hardened").build().unwrap();
-        assert_eq!(a.domain, AttrDomain::Endpoint);
+        let a = Attribute::tag("device.hardened").build().unwrap();
+        assert_eq!(a.domain, AttrDomain::Device);
         assert_eq!(a.name, "hardened");
         assert_eq!(a.values, None);
         assert_eq!(a.is_multi_valued(), false);
         assert_eq!(a.is_tag(), true);
         assert_eq!(a.optional, false);
-        assert_eq!("#endpoint.hardened", a.to_instance_string());
-        assert_eq!("endpoint.zpr.tag", a.zpl_key());
-        assert_eq!("endpoint.hardened", a.zpl_value());
+        assert_eq!("#device.hardened", a.to_instance_string());
+        assert_eq!("device.zpr.tag", a.zpl_key());
+        assert_eq!("device.hardened", a.zpl_value());
     }
 
     #[test]
@@ -504,8 +504,8 @@ mod test {
 
     #[test]
     fn test_zplc_key_tag_attribute() {
-        let a = Attribute::tag("endpoint.hardened").build().unwrap();
-        assert_eq!("#endpoint.hardened", a.zplc_key());
+        let a = Attribute::tag("device.hardened").build().unwrap();
+        assert_eq!("#device.hardened", a.zplc_key());
     }
 
     #[test]
@@ -529,9 +529,9 @@ mod test {
         let mut a = Attribute::tuple("service.role").single().build().unwrap();
         a.optional = true;
         assert_eq!("service.role", a.zplc_key());
-        let mut a = Attribute::tag("endpoint.secure").build().unwrap();
+        let mut a = Attribute::tag("device.secure").build().unwrap();
         a.optional = true;
-        assert_eq!("#endpoint.secure", a.zplc_key());
+        assert_eq!("#device.secure", a.zplc_key());
         let mut a = Attribute::tuple("user.permissions")
             .multi()
             .build()
@@ -571,12 +571,12 @@ mod test {
             .unwrap();
         assert_eq!("service.type", service_attr.zplc_key());
 
-        let endpoint_attr = Attribute::tuple("endpoint.ip")
+        let device_attr = Attribute::tuple("device.ip")
             .single()
             .value("192.168.1.1")
             .build()
             .unwrap();
-        assert_eq!("endpoint.ip", endpoint_attr.zplc_key());
+        assert_eq!("device.ip", device_attr.zplc_key());
 
         let zpr_attr =
             Attribute::try_zpr_internal_attr("zpr.test", "value").expect("zpr prefix not found");
