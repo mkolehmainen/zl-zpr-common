@@ -34,4 +34,24 @@ pub enum PolicyTypeError {
 
     #[error("IP address parse error: {0}")]
     AddrParseError(#[from] std::net::AddrParseError),
+
+    #[error("attribute mapping error: {0}")]
+    AttrMapping(#[from] AttrMappingError),
+}
+
+#[derive(Debug, Error)]
+pub enum AttrMappingError {
+    #[error(
+        "invalid attribute mapping '{0}', must be of the form '<service-key-name> -> <attribute-spec>'"
+    )]
+    InvalidFormat(String),
+
+    #[error("attribute mapping '{mapping}' has an empty {side}")]
+    EmptySide { mapping: String, side: &'static str },
+
+    #[error("attribute error in mapping '{mapping}': {source}")]
+    Attribute {
+        mapping: String,
+        source: AttributeError,
+    },
 }
