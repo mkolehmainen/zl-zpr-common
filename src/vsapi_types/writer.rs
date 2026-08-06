@@ -4,8 +4,8 @@ use crate::vsapi::v1;
 use crate::vsapi_types::{
     ApiResponseError, AuthBlob, ChallengeAlg, Claim, CommFlag, ConnectRequest, Connection, DockPep,
     DockPepType, EndpointT, FwdPep, FwdPepStyle, IcmpPep, KeySet, Link, LinkRole, PacketDesc,
-    Param, ParamValue, ServiceDescriptor, SockAddr, TcpUdpPep, VSConnectRequest, Visa, VisaOp,
-    VisaType,
+    Param, ParamValue, PublicKey, ServiceDescriptor, SockAddr, TcpUdpPep, VSConnectRequest, Visa,
+    VisaOp, VisaType,
 };
 use crate::write_to::WriteTo;
 
@@ -136,6 +136,13 @@ impl WriteTo<v1::key_set::Builder<'_>> for KeySet {
     }
 }
 
+impl WriteTo<v1::public_key::Builder<'_>> for PublicKey {
+    fn write_to(&self, bldr: &mut v1::public_key::Builder<'_>) {
+        bldr.set_format(v1::KeyFormat::ZprKF01);
+        bldr.set_public_key(&self.public_key);
+    }
+}
+
 impl WriteTo<v1::packet_desc::Builder<'_>> for PacketDesc {
     fn write_to(&self, bldr: &mut v1::packet_desc::Builder<'_>) {
         let mut ip_bldr = bldr.reborrow().init_source_addr();
@@ -241,6 +248,8 @@ impl WriteTo<v1::connect_request::Builder<'_>> for ConnectRequest {
         let mut ip_bldr = bldr.reborrow().init_substrate_addr();
         self.substrate_addr.write_to(&mut ip_bldr);
         bldr.set_dock_interface(self.dock_interface);
+        let mut key_bldr = bldr.reborrow().init_a2a_dh_public_key();
+        self.a2a_dh_public_key.write_to(&mut key_bldr);
     }
 }
 
