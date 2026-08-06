@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::packet_info::L3Type;
 use crate::vsapi::v1;
+use crate::vsapi_types::KeyFormat;
 use crate::vsapi_types::VsapiFiveTuple;
 use crate::vsapi_types::VsapiTypeError;
 use crate::vsapi_types::packet::HasFiveTuple;
@@ -91,12 +92,6 @@ pub struct KeySet {
     pub ingress_key: Vec<u8>,
     /// session key encrypted for egress node to read
     pub egress_key: Vec<u8>,
-}
-
-#[derive(Default, Debug, Clone)]
-pub enum KeyFormat {
-    #[default]
-    ZprKF01,
 }
 
 #[derive(Debug)]

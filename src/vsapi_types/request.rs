@@ -2,6 +2,7 @@ use std::net::IpAddr;
 
 use crate::vsapi::v1;
 use crate::vsapi_types::AuthBlob;
+use crate::vsapi_types::KeyFormat;
 use crate::vsapi_types::PacketDesc;
 use crate::vsapi_types::Param;
 use crate::vsapi_types::VsapiTypeError;
@@ -13,6 +14,7 @@ pub struct ConnectRequest {
     pub claims: Vec<Claim>,
     pub substrate_addr: IpAddr,
     pub dock_interface: u8,
+    pub a2a_dh_public_key: PublicKey,
 }
 
 /// Wraps the Cap'n Proto `VSConnT` enum.
@@ -38,6 +40,21 @@ pub struct Claim {
 impl Claim {
     pub fn new(key: String, value: String) -> Self {
         Self { key, value }
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct PublicKey {
+    pub format: KeyFormat,
+    pub public_key: Vec<u8>,
+}
+
+impl PublicKey {
+    pub fn new(key: &[u8]) -> Self {
+        PublicKey {
+            format: KeyFormat::default(),
+            public_key: key.to_vec(),
+        }
     }
 }
 
@@ -67,12 +84,14 @@ impl TryFrom<v1::connect_request::Reader<'_>> for ConnectRequest {
             let claim = Claim::try_from(claim_reader)?;
             claims.push(claim);
         }
+        let a2a_dh_public_key = PublicKey::try_from(reader.get_a2a_dh_public_key()?)?;
 
         Ok(ConnectRequest {
             blobs,
             claims,
             substrate_addr,
             dock_interface,
+            a2a_dh_public_key,
         })
     }
 }
@@ -98,6 +117,20 @@ impl TryFrom<v1::v_s_connect_request::Reader<'_>> for VSConnectRequest {
         };
 
         Ok(VSConnectRequest { cn, ctype, params })
+    }
+}
+
+impl TryFrom<v1::public_key::Reader<'_>> for PublicKey {
+    type Error = VsapiTypeError;
+
+    /// Returns err if required values are not set
+    fn try_from(reader: v1::public_key::Reader) -> Result<Self, Self::Error> {
+        let format = match reader.get_format()? {
+            v1::KeyFormat::ZprKF01 => KeyFormat::ZprKF01,
+        };
+        let public_key = reader.get_public_key()?.to_vec();
+
+        Ok(Self { format, public_key })
     }
 }
 
@@ -248,5 +281,31 @@ mod tests {
             ParamValue::StrParam(ref value) if value == "resume"
         ));
         assert!(matches!(params[1].value, ParamValue::U64Param(u64::MAX)));
+    }
+
+    #[test]
+    fn connect_request_roundtrip_with_a2a_dh_public_key() {
+        let key = [7u8; 32];
+        let original = ConnectRequest {
+            blobs: Vec::new(),
+            claims: Vec::new(),
+            substrate_addr: IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40)),
+            dock_interface: 1,
+            a2a_dh_public_key: PublicKey::new(&key),
+        };
+
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::connect_request::Builder<'_> = msg.init_root();
+            original.write_to(&mut root);
+        }
+        let reader: v1::connect_request::Reader<'_> = msg.get_root_as_reader().unwrap();
+        let result = ConnectRequest::try_from(reader).unwrap();
+
+        assert_eq!(result.a2a_dh_public_key.public_key, key);
+        assert!(matches!(
+            result.a2a_dh_public_key.format,
+            KeyFormat::ZprKF01
+        ));
     }
 }
