@@ -290,6 +290,10 @@ impl WriteTo<v1::param::Builder<'_>> for Param {
                 bldr.set_ptype(v1::ParamT::U64);
                 bldr.set_value_u64(*val);
             }
+            ParamValue::X25519PubKey(pubkey) => {
+                bldr.set_ptype(v1::ParamT::X25519Pubkey);
+                bldr.set_value_data(pubkey.as_bytes());
+            }
         }
     }
 }
