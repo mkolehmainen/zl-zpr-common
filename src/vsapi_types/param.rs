@@ -5,6 +5,7 @@ use crate::vsapi_types::VsapiTypeError;
 
 const IPV4_LEN: usize = 4;
 const IPV6_LEN: usize = 16;
+const X25519_PUBKEY_LEN: usize = 32;
 
 /// Shared, well known parameter names.
 pub mod pname {
@@ -13,6 +14,9 @@ pub mod pname {
 
     /// Used to pass a network prefix string in CIDR format.
     pub const AAA_PREFIX: &str = "aaa_prefix";
+
+    /// Used for A2A Diffie-Hellman public key exchange.
+    pub const A2A_DH_PUBKEY: &str = "a2a_dh_pubkey";
 }
 
 #[derive(Debug)]
@@ -20,6 +24,7 @@ pub enum ParamValue {
     StrParam(String),
     U64Param(u64),
     IpParam(std::net::IpAddr),
+    X25519PubKey(x25519_dalek::PublicKey),
 }
 
 #[derive(Debug)]
@@ -51,6 +56,13 @@ impl Param {
         Param {
             name,
             value: ParamValue::IpParam(value),
+        }
+    }
+
+    pub fn new_x25519_pubkey(name: String, value: x25519_dalek::PublicKey) -> Self {
+        Param {
+            name,
+            value: ParamValue::X25519PubKey(value),
         }
     }
 }
@@ -136,6 +148,31 @@ impl TryFrom<v1::param::Reader<'_>> for Param {
                 _ => {
                     return Err(VsapiTypeError::DeserializationError(
                         "IPv6 param must be valueData",
+                    ));
+                }
+            },
+            v1::ParamT::X25519Pubkey => match reader.which()? {
+                v1::param::ValueData(data) => {
+                    let bytes = data?;
+                    if bytes.len() != X25519_PUBKEY_LEN {
+                        return Err(VsapiTypeError::DeserializationError(
+                            "X25519 public key param must be 32 bytes",
+                        ));
+                    }
+                    let key_bytes =
+                        <[u8; X25519_PUBKEY_LEN]>::try_from(bytes.as_ref()).map_err(|_| {
+                            VsapiTypeError::DeserializationError(
+                                "Failed to convert to [u8; 32] for X25519 public key",
+                            )
+                        })?;
+                    return Ok(Param {
+                        name: pname,
+                        value: ParamValue::X25519PubKey(key_bytes.into()),
+                    });
+                }
+                _ => {
+                    return Err(VsapiTypeError::DeserializationError(
+                        "X25519 public key param must be valueData",
                     ));
                 }
             },
@@ -289,6 +326,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn x25519_pubkey_param_roundtrip() {
+        let bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let msg = data_param_msg(pname::A2A_DH_PUBKEY, v1::ParamT::X25519Pubkey, &bytes);
+        let param = read_param(&msg).unwrap();
+        assert_eq!(param.name, pname::A2A_DH_PUBKEY);
+        match param.value {
+            ParamValue::X25519PubKey(k) => {
+                assert_eq!(k.as_bytes(), &bytes);
+            }
+            _ => panic!("expected X25519PubKey"),
+        }
+    }
+
+    #[test]
+    fn x25519_pubkey_zero() {
+        let bytes = [0u8; 32];
+        let msg = data_param_msg("dh", v1::ParamT::X25519Pubkey, &bytes);
+        let param = read_param(&msg).unwrap();
+        assert!(matches!(
+            param.value,
+            ParamValue::X25519PubKey(k) if k.as_bytes() == &bytes
+        ));
+    }
+
     // --- type/union mismatches ---
 
     #[test]
@@ -345,6 +407,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn x25519_pubkey_ptype_text_union_errors() {
+        let msg = text_param_msg("x", v1::ParamT::X25519Pubkey, "not-bytes");
+        assert!(matches!(
+            read_param(&msg),
+            Err(VsapiTypeError::DeserializationError(_))
+        ));
+    }
+
     // --- wrong byte lengths for IP types ---
 
     #[test]
@@ -386,6 +457,24 @@ mod tests {
     #[test]
     fn ipv6_too_many_bytes_errors() {
         let msg = data_param_msg("x", v1::ParamT::Ipv6, &[0u8; 17]);
+        assert!(matches!(
+            read_param(&msg),
+            Err(VsapiTypeError::DeserializationError(_))
+        ));
+    }
+
+    #[test]
+    fn x25519_pubkey_too_few_bytes_errors() {
+        let msg = data_param_msg("x", v1::ParamT::X25519Pubkey, &[0u8; 31]);
+        assert!(matches!(
+            read_param(&msg),
+            Err(VsapiTypeError::DeserializationError(_))
+        ));
+    }
+
+    #[test]
+    fn x25519_pubkey_too_many_bytes_errors() {
+        let msg = data_param_msg("x", v1::ParamT::X25519Pubkey, &[0u8; 33]);
         assert!(matches!(
             read_param(&msg),
             Err(VsapiTypeError::DeserializationError(_))
