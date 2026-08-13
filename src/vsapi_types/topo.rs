@@ -1,5 +1,5 @@
 use crate::vsapi::v1;
-use crate::vsapi_types::{SockAddr, VsapiTypeError};
+use crate::vsapi_types::{SockAddr, Visa, VsapiTypeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkRole {
@@ -12,6 +12,7 @@ pub struct Link {
     pub link_id: String,
     pub peer: SockAddr,
     pub role: LinkRole,
+    pub visas: Vec<Visa>,
 }
 
 impl From<v1::LinkRole> for LinkRole {
@@ -30,10 +31,17 @@ impl TryFrom<v1::link::Reader<'_>> for Link {
         let link_id = reader.get_link_id()?.to_string()?;
         let peer = SockAddr::try_from(reader.get_peer()?)?;
         let role = LinkRole::from(reader.get_role()?);
+
+        let mut visas = Vec::new();
+        for visa_reader in reader.get_visas()?.iter() {
+            visas.push(Visa::try_from(visa_reader)?);
+        }
+
         Ok(Link {
             link_id,
             peer,
             role,
+            visas,
         })
     }
 }
@@ -48,9 +56,10 @@ impl Link {
 mod tests {
     use super::*;
     use crate::vsapi::v1;
-    use crate::vsapi_types::SockAddr;
+    use crate::vsapi_types::{DockPepType, EndpointT, KeySet, SockAddr, TcpUdpPep};
     use crate::write_to::WriteTo;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn make_link_msg(
         link_id: &str,
@@ -88,6 +97,25 @@ mod tests {
         }
         let reader: v1::link::Reader<'_> = msg.get_root_as_reader().unwrap();
         Link::try_from(reader).unwrap()
+    }
+
+    // NOTE: config/cons are dropped on read (see Visa::try_from TODO), so keep them at
+    // their defaults or the roundtrip assert compares fields capnp never carried.
+    fn make_visa(issuer_id: u64) -> Visa {
+        Visa::new(
+            issuer_id,
+            0,
+            UNIX_EPOCH + Duration::from_millis(1_700_000_000_000),
+            IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 2, 2, 2)),
+            DockPepType::TCP(TcpUdpPep {
+                source_port: 1111,
+                dest_port: 443,
+                endpoint: EndpointT::Client,
+            }),
+            KeySet::new(&[1, 2, 3], &[4, 5, 6]),
+            None,
+        )
     }
 
     fn roundtrip_sock_addr(sa: &SockAddr) -> SockAddr {
@@ -145,6 +173,7 @@ mod tests {
                 port: 8080,
             },
             role: LinkRole::Active,
+            visas: vec![],
         };
         let result = roundtrip_link(&original);
         assert_eq!(result, original);
@@ -161,6 +190,7 @@ mod tests {
                 port: 9000,
             },
             role: LinkRole::Backup,
+            visas: vec![make_visa(7), make_visa(8)],
         };
         let result = roundtrip_link(&original);
         assert_eq!(result, original);

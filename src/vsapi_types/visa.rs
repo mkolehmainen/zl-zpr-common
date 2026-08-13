@@ -13,7 +13,7 @@ use crate::vsapi_types::vsapi_ip_number;
 
 /// Structure representing the Visa
 // TODO figure out which of these need to stay once we switch to capnp
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Visa {
     pub issuer_id: u64,
     pub config: i64,
@@ -34,7 +34,7 @@ pub enum VisaType {
     ForwardOnly,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FwdPep {
     /// Node ZPR address
     pub next_hop: IpAddr,
@@ -49,7 +49,7 @@ pub enum FwdPepStyle {
     Symmetric,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockPep {
     pub source_addr: IpAddr,
     pub dest_addr: IpAddr,
@@ -57,35 +57,35 @@ pub struct DockPep {
     pub pep: DockPepType,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DockPepType {
     TCP(TcpUdpPep),
     UDP(TcpUdpPep),
     ICMP(IcmpPep),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpUdpPep {
     pub source_port: u16,
     pub dest_port: u16,
     pub endpoint: EndpointT,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointT {
     Any,
     Server,
     Client,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IcmpPep {
     /// the allowed ICMP type and code (in lower 16 bits)
     pub icmp_type: u8,
     pub icmp_code: u8,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct KeySet {
     pub format: KeyFormat,
     /// session key encrypted for ingress node to read
@@ -100,7 +100,7 @@ pub enum VisaOp {
     RevokeVisaId(u64),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Constraints {
     /// not set or none means no bandwidth constraint
     pub bw: bool,
