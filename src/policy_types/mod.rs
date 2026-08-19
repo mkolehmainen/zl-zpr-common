@@ -10,7 +10,7 @@ mod trusted_service;
 mod writer;
 
 pub use attr_exp::{AttrExp, AttrOp};
-pub use attribute::{AttrDomain, Attribute};
+pub use attribute::{AttrDomain, Attribute, ZPR_TAG_KEY_PREFIX, is_reserved_tag_name};
 pub use error::{AttrMappingError, AttributeError, PolicyTypeError};
 pub use join::{JoinPolicy, PFlags, Scope, ScopeFlag, Service, ServiceType};
 pub use policy_bundle::{PolicyBundle, PolicyContainerBytes};

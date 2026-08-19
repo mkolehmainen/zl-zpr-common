@@ -209,7 +209,8 @@ mod test {
         assert_eq!(m.service_attr_key, "service_key");
         assert_eq!(m.zpr_attr_spec, "#device.tag");
         assert_eq!(*m.attr.get_domain_ref(), AttrDomain::Device);
-        assert_eq!(m.attr.zpl_value(), "device.tag");
+        assert_eq!(m.attr.zpl_key(), "device.zpr.tag.tag");
+        assert_eq!(m.attr.zpl_value(), "");
         assert!(m.attr.is_tag());
         assert!(!m.attr.is_multi_valued());
         assert!(!m.attr.optional);
@@ -258,6 +259,21 @@ mod test {
     fn test_parse_attribute_mapping_too_many_arrows() {
         let e = parse_attribute_mapping("key -> attr -> extra").unwrap_err();
         assert!(matches!(e, AttrMappingError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_parse_attribute_mapping_reserved_tag_name() {
+        // Ordinary attributes may not use the zpr.tag.* namespace reserved for tags.
+        for spec in [
+            "key -> user.zpr.tag.red",
+            "key -> user.zpr.tag",
+            "key -> user.zpr.tag.red{}",
+        ] {
+            let e = parse_attribute_mapping(spec).unwrap_err();
+            assert!(matches!(e, AttrMappingError::Attribute { .. }), "{spec}");
+        }
+        // But a tag spec (which generates such a key) is fine.
+        assert!(parse_attribute_mapping("key -> #user.red").is_ok());
     }
 
     #[test]

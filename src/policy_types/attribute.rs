@@ -8,6 +8,25 @@ pub const ATTR_DOMAIN_DEVICE: &str = "device";
 pub const ATTR_DOMAIN_LINK: &str = "link";
 pub const ATTR_DOMAIN_ZPR_INTERNAL: &str = "zpr";
 
+/// Name-space (within a domain) reserved for the tag encoding: a tag named `red` in the
+/// user domain is encoded with the attribute key `user.zpr.tag.red`.
+pub const ZPR_TAG_KEY_PREFIX: &str = "zpr.tag";
+
+/// True if `name` (an attribute name without its domain prefix) is reserved for the
+/// tag encoding and therefore not usable as an ordinary attribute name.
+pub fn is_reserved_tag_name(name: &str) -> bool {
+    name == ZPR_TAG_KEY_PREFIX || name.starts_with("zpr.tag.")
+}
+
+fn validate_tuple_name(name: &str) -> Result<(), AttributeError> {
+    if is_reserved_tag_name(name) {
+        return Err(AttributeError::InvalidOperation(format!(
+            "attribute name '{name}' is reserved for tag encoding"
+        )));
+    }
+    Ok(())
+}
+
 /// A ZPL attribute. Could be a tuple type attribute, eg "user.role:marketing" or a
 /// tag type.  An attribute may be optional or required, and may be multi-valued
 /// or single-valued.
@@ -182,6 +201,9 @@ impl TupleAttrBuilder {
 
     pub fn build(self) -> Result<Attribute, AttributeError> {
         let (domain, name) = resolve_domain(&self.raw_name, self.domain_fb)?;
+        // Tags are encoded with `<domain>.zpr.tag.<name>` keys, so ordinary
+        // attributes may not use names in that space.
+        validate_tuple_name(&name)?;
         let attr_type = match (&self.values, self.attr_type) {
             (_, AttrT::MultiValued) => AttrT::MultiValued, // explicitly set by caller
             (Some(v), AttrT::SingleValued) if v.len() > 1 => AttrT::MultiValued, // inferred from values
@@ -313,7 +335,11 @@ impl Attribute {
 
     /// Create and return a new attribute with the same characteristics of this one but with the new name provided.
     /// If `new_name` includes a valid domain prefix, the returned attribute will have that domain.
-    pub fn clone_with_new_name<S: Into<String>>(&self, new_name: S) -> Self {
+    /// Ordinary attributes cannot be renamed into the namespace reserved for tag encoding.
+    pub fn clone_with_new_name<S: Into<String>>(
+        &self,
+        new_name: S,
+    ) -> Result<Self, AttributeError> {
         let mut new_a = self.clone();
         let new_name = new_name.into();
         let (dom, name) = match Attribute::parse_domain(&new_name) {
@@ -321,13 +347,21 @@ impl Attribute {
             // If the new name does not have a domain prefix, use the current domain.
             Err(_) => (self.domain.clone(), new_name.to_string()),
         };
+        if !self.is_tag() {
+            validate_tuple_name(&name)?;
+        }
         new_a.name = name;
         new_a.domain = dom;
-        new_a
+        Ok(new_a)
     }
 
     pub fn is_tag(&self) -> bool {
         self.attr_type == AttrT::Tag
+    }
+
+    /// The attribute (or tag) name, without the domain prefix.
+    pub fn get_name(&self) -> &str {
+        &self.name
     }
 
     pub fn is_single_valued(&self) -> bool {
@@ -387,10 +421,12 @@ impl Attribute {
     }
 
     /// The the ZPL name for the key of this attribute. The key is just the attribute name
-    /// unless this is a tag, in which case the key is "\<domain\>.zpr.tag".
+    /// unless this is a tag, in which case the key is "\<domain\>.zpr.tag.\<name\>".
+    /// Each tag gets its own key so that tags never collide with each other and each
+    /// carries its own source/expiration downstream.
     pub fn zpl_key(&self) -> String {
         if self.is_tag() {
-            format!("{}.zpr.tag", self.domain)
+            format!("{}.{}.{}", self.domain, ZPR_TAG_KEY_PREFIX, self.name)
         } else {
             format!("{}.{}", self.domain, self.name)
         }
@@ -398,21 +434,20 @@ impl Attribute {
 
     /// The ZPL value for this attribute. If there is no value an empty string is returned.
     /// If there are multiple values a comma separated list is returned.
+    /// Tags have no value (presence of the key is the tag).
     pub fn zpl_value(&self) -> String {
-        if self.is_tag() {
-            format!("{}.{}", self.domain, self.name)
-        } else if let Some(v) = &self.values {
+        if let (false, Some(v)) = (self.is_tag(), &self.values) {
             v.join(", ")
         } else {
             "".to_string()
         }
     }
 
-    /// If this is a tag you get the domain qualified tag name as the single value.
-    /// Otherwise, you get the set of values (which may be empty).
+    /// The set of values (which may be empty). Tags always have no values: a tag is
+    /// encoded as a valueless `has` on its `zpl_key()`.
     pub fn zpl_values(&self) -> Vec<String> {
         if self.is_tag() {
-            return vec![format!("{}.{}", self.domain, self.name)];
+            return vec![];
         }
         if let Some(v) = &self.values {
             let mut sorted_values = v.clone();
@@ -473,8 +508,9 @@ mod test {
         assert_eq!(a.is_tag(), true);
         assert_eq!(a.optional, false);
         assert_eq!("#device.hardened", a.to_instance_string());
-        assert_eq!("device.zpr.tag", a.zpl_key());
-        assert_eq!("device.hardened", a.zpl_value());
+        assert_eq!("device.zpr.tag.hardened", a.zpl_key());
+        assert_eq!("", a.zpl_value());
+        assert!(a.zpl_values().is_empty());
     }
 
     #[test]
@@ -513,8 +549,42 @@ mod test {
         let a = Attribute::tag("user.red").build().unwrap();
         assert_eq!("#user.red", a.to_instance_string());
         assert_eq!("#user.red", a.to_schema_string());
-        assert_eq!("user.zpr.tag", a.zpl_key());
-        assert_eq!("user.red", a.zpl_value());
+        assert_eq!("user.zpr.tag.red", a.zpl_key());
+        assert_eq!("", a.zpl_value());
+        assert!(a.zpl_values().is_empty());
+    }
+
+    #[test]
+    fn test_reserved_tag_names() {
+        assert!(is_reserved_tag_name("zpr.tag"));
+        assert!(is_reserved_tag_name("zpr.tag.red"));
+        assert!(!is_reserved_tag_name("zpr.tagged"));
+        assert!(!is_reserved_tag_name("zpr.adapter.cn"));
+        assert!(!is_reserved_tag_name("role"));
+    }
+
+    #[test]
+    fn test_clone_with_new_name_rejects_reserved_tag_names_for_tuples() {
+        let tuple = Attribute::tuple("user.role").build().unwrap();
+
+        for name in ["user.zpr.tag", "user.zpr.tag.red", "zpr.tag.red"] {
+            let error = tuple.clone_with_new_name(name).unwrap_err();
+            assert!(
+                matches!(error, AttributeError::InvalidOperation(_)),
+                "{name}"
+            );
+        }
+
+        let renamed = tuple.clone_with_new_name("device.posture").unwrap();
+        assert_eq!(renamed.zpl_key(), "device.posture");
+    }
+
+    #[test]
+    fn test_clone_with_new_name_allows_tag_names() {
+        let tag = Attribute::tag("user.red").build().unwrap();
+        let renamed = tag.clone_with_new_name("device.zpr.tag.red").unwrap();
+
+        assert_eq!(renamed.zpl_key(), "device.zpr.tag.zpr.tag.red");
     }
 
     #[test]
