@@ -26,6 +26,8 @@ impl WriteTo<v1::link::Builder<'_>> for Link {
             LinkRole::Active => v1::LinkRole::Active,
             LinkRole::Backup => v1::LinkRole::Backup,
         });
+        let mut zpr_addr_bldr = bldr.reborrow().init_zpr_addr();
+        self.zpr_addr.write_to(&mut zpr_addr_bldr);
         let mut visas_bldr = bldr.reborrow().init_visas(self.visas.len() as u32);
         for (i, visa) in self.visas.iter().enumerate() {
             let mut visa_bldr = visas_bldr.reborrow().get(i as u32);

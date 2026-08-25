@@ -1,5 +1,6 @@
 use crate::vsapi::v1;
 use crate::vsapi_types::{SockAddr, Visa, VsapiTypeError};
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkRole {
@@ -13,6 +14,8 @@ pub struct Link {
     pub peer: SockAddr,
     pub role: LinkRole,
     pub visas: Vec<Visa>,
+    /// ZPR address of the peer.
+    pub zpr_addr: IpAddr,
 }
 
 impl From<v1::LinkRole> for LinkRole {
@@ -31,6 +34,12 @@ impl TryFrom<v1::link::Reader<'_>> for Link {
         let link_id = reader.get_link_id()?.to_string()?;
         let peer = SockAddr::try_from(reader.get_peer()?)?;
         let role = LinkRole::from(reader.get_role()?);
+        if !reader.has_zpr_addr() {
+            return Err(VsapiTypeError::DeserializationError(
+                "link is missing zprAddr",
+            ));
+        }
+        let zpr_addr = IpAddr::try_from(reader.get_zpr_addr()?)?;
 
         let mut visas = Vec::new();
         for visa_reader in reader.get_visas()?.iter() {
@@ -42,6 +51,7 @@ impl TryFrom<v1::link::Reader<'_>> for Link {
             peer,
             role,
             visas,
+            zpr_addr,
         })
     }
 }
@@ -61,17 +71,43 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::{Duration, UNIX_EPOCH};
 
+    const TEST_ZPR_ADDR: &str = "fd5a:5052::42";
+
     fn make_link_msg(
         link_id: &str,
         peer_ip: IpAddr,
         peer_port: u16,
         role: v1::LinkRole,
     ) -> capnp::message::Builder<capnp::message::HeapAllocator> {
+        make_link_msg_with_zpr_addr(link_id, peer_ip, peer_port, role, Some(TEST_ZPR_ADDR))
+    }
+
+    fn make_link_msg_with_zpr_addr(
+        link_id: &str,
+        peer_ip: IpAddr,
+        peer_port: u16,
+        role: v1::LinkRole,
+        zpr_addr: Option<&str>,
+    ) -> capnp::message::Builder<capnp::message::HeapAllocator> {
         let mut msg = capnp::message::Builder::new_default();
         {
             let mut root: v1::link::Builder<'_> = msg.init_root();
             root.set_link_id(link_id);
             root.set_role(role);
+            if let Some(zpr) = zpr_addr {
+                let ip: IpAddr = zpr.parse().unwrap();
+                let mut zpr_bldr = root.reborrow().init_zpr_addr();
+                match ip {
+                    IpAddr::V4(ipv4) => {
+                        let buf = zpr_bldr.reborrow().init_v4(4);
+                        buf.copy_from_slice(&ipv4.octets());
+                    }
+                    IpAddr::V6(ipv6) => {
+                        let buf = zpr_bldr.reborrow().init_v6(16);
+                        buf.copy_from_slice(&ipv6.octets());
+                    }
+                }
+            }
             let mut peer = root.reborrow().init_peer();
             peer.set_port(peer_port);
             let mut addr_bldr = peer.reborrow().init_addr();
@@ -174,6 +210,7 @@ mod tests {
             },
             role: LinkRole::Active,
             visas: vec![],
+            zpr_addr: TEST_ZPR_ADDR.parse().unwrap(),
         };
         let result = roundtrip_link(&original);
         assert_eq!(result, original);
@@ -191,9 +228,39 @@ mod tests {
             },
             role: LinkRole::Backup,
             visas: vec![make_visa(7), make_visa(8)],
+            zpr_addr: IpAddr::V6("fd5a:5052::7".parse().unwrap()),
         };
         let result = roundtrip_link(&original);
         assert_eq!(result, original);
+    }
+
+    // The zpr_addr must carry through a capnp write/read roundtrip.
+    #[test]
+    fn test_link_roundtrip_zpr_addr_present() {
+        let zpr_ip: IpAddr = "fd5a:5052::42".parse().unwrap();
+        let original = Link {
+            link_id: "rt-zpr-addr".to_string(),
+            peer: SockAddr {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+                port: 4500,
+            },
+            role: LinkRole::Active,
+            visas: vec![],
+            zpr_addr: zpr_ip,
+        };
+        let result = roundtrip_link(&original);
+        assert_eq!(result.zpr_addr, zpr_ip);
+        assert_eq!(result, original);
+    }
+
+    // A message built without zprAddr must fail to deserialize: the field is required.
+    #[test]
+    fn test_link_tryfrom_zpr_addr_absent() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let msg =
+            make_link_msg_with_zpr_addr("link-no-zpr-addr", ip, 4500, v1::LinkRole::Active, None);
+        let reader: v1::link::Reader<'_> = msg.get_root_as_reader().unwrap();
+        assert!(Link::try_from(reader).is_err());
     }
 
     #[test]
