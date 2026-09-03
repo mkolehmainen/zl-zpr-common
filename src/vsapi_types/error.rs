@@ -58,6 +58,8 @@ pub enum ErrorCode {
     TemporarilyUnavailable,
     AuthError,
     ParamError,
+    /// Authentication succeeded; no join policy admits this endpoint.
+    PolicyDenied,
     UnknownStatusCode,
     Fail,
 }
@@ -111,6 +113,7 @@ impl Into<v1::ErrorCode> for ErrorCode {
             ErrorCode::TemporarilyUnavailable => v1::ErrorCode::TemporarilyUnavailable,
             ErrorCode::AuthError => v1::ErrorCode::AuthError,
             ErrorCode::ParamError => v1::ErrorCode::ParamError,
+            ErrorCode::PolicyDenied => v1::ErrorCode::PolicyDenied,
 
             // These are not 1:1 mapped to IDL.
             ErrorCode::UnknownStatusCode => v1::ErrorCode::Internal,
