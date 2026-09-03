@@ -17,7 +17,7 @@ mod vsnet;
 mod writer;
 
 // PUBLIC API EXPORTS
-pub use auth::{AuthBlob, AuthCodeBlob, ChallengeAlg, SelfSignedBlob};
+pub use auth::{AuthBlob, AuthCodeBlob, ChallengeAlg, OidcBlob, SelfSignedBlob};
 pub use common::KeyFormat;
 pub use error::{ApiResponseError, ErrorCode, VsapiTypeError};
 pub use packet::{
@@ -28,7 +28,7 @@ pub use request::{Claim, ConnectRequest, ConnectType, PublicKey, VSConnectReques
 pub use response::{
     Connection, Denied, DenyCode, DisconnectNotice, DisconnectReason, VisaDecision, VisaResponse,
 };
-pub use services::{AuthServicesList, ServiceDescriptor};
+pub use services::{AuthServicesList, OidcClientConfig, ServiceDescriptor, ServiceT};
 pub use topo::{Link, LinkRole};
 pub use util::ip::ip_addr_from_vec;
 pub use util::time::visa_expiration_timestamp_to_system_time;
@@ -47,9 +47,11 @@ mod tests {
     // Helper function to create a test ServiceDescriptor
     fn create_test_service_descriptor() -> ServiceDescriptor {
         ServiceDescriptor {
+            stype: ServiceT::ActorAuthentication,
             service_id: "test-service-123".to_string(),
             service_uri: "https://auth.example.com:8443/auth".to_string(),
             zpr_addr: IpAddr::from([192, 168, 1, 100]),
+            oidc: None,
         }
     }
 
@@ -57,9 +59,11 @@ mod tests {
     fn create_test_service_descriptor_v6() -> ServiceDescriptor {
         let ipv6_addr: Ipv6Addr = "2001:db8::1".parse().unwrap();
         ServiceDescriptor {
+            stype: ServiceT::ActorAuthentication,
             service_id: "test-service-ipv6".to_string(),
             service_uri: "https://auth.example.com:9443/auth".to_string(),
             zpr_addr: IpAddr::from(ipv6_addr),
+            oidc: None,
         }
     }
 

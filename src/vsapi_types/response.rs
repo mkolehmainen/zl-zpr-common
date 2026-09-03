@@ -214,6 +214,7 @@ impl From<v1::ErrorCode> for ErrorCode {
             v1::ErrorCode::TemporarilyUnavailable => ErrorCode::TemporarilyUnavailable,
             v1::ErrorCode::AuthError => ErrorCode::AuthError,
             v1::ErrorCode::ParamError => ErrorCode::ParamError,
+            v1::ErrorCode::PolicyDenied => ErrorCode::PolicyDenied,
         }
     }
 }

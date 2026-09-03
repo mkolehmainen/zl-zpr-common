@@ -4,8 +4,8 @@ use crate::vsapi::v1;
 use crate::vsapi_types::{
     ApiResponseError, AuthBlob, ChallengeAlg, Claim, CommFlag, ConnectRequest, Connection, DockPep,
     DockPepType, EndpointT, FwdPep, FwdPepStyle, IcmpPep, KeySet, Link, LinkRole, PacketDesc,
-    Param, ParamValue, PublicKey, ServiceDescriptor, SockAddr, TcpUdpPep, VSConnectRequest, Visa,
-    VisaOp, VisaType,
+    Param, ParamValue, PublicKey, ServiceDescriptor, ServiceT, SockAddr, TcpUdpPep,
+    VSConnectRequest, Visa, VisaOp, VisaType,
 };
 use crate::write_to::WriteTo;
 
@@ -183,11 +183,30 @@ impl WriteTo<v1::visa_op::Builder<'_>> for VisaOp {
 
 impl WriteTo<v1::service_descriptor::Builder<'_>> for ServiceDescriptor {
     fn write_to(&self, bldr: &mut v1::service_descriptor::Builder<'_>) {
-        bldr.set_stype(v1::ServiceT::ActorAuthentication);
+        let stype = match self.stype {
+            ServiceT::ActorAuthentication => v1::ServiceT::ActorAuthentication,
+            ServiceT::OidcAuthentication => v1::ServiceT::OidcAuthentication,
+        };
+        bldr.set_stype(stype);
         bldr.set_service_id(self.service_id.clone());
         bldr.set_service_uri(self.service_uri.clone());
         let mut ip_bldr = bldr.reborrow().init_zpr_addr();
         self.zpr_addr.write_to(&mut ip_bldr);
+
+        // Only initialise the oidc pointer when a config is present, so it reads
+        // back as has_oidc() == false otherwise.
+        if let Some(oidc) = &self.oidc {
+            let mut oidc_bldr = bldr.reborrow().init_oidc();
+            oidc_bldr.set_issuer(&oidc.issuer);
+            oidc_bldr.set_client_id(&oidc.client_id);
+            // None is encoded as "" on the wire (Contract 2).
+            oidc_bldr.set_client_secret(oidc.client_secret.as_deref().unwrap_or(""));
+            let mut scopes = oidc_bldr.reborrow().init_scopes(oidc.scopes.len() as u32);
+            for (i, s) in oidc.scopes.iter().enumerate() {
+                scopes.set(i as u32, s);
+            }
+            oidc_bldr.set_allow_offline_access(oidc.allow_offline_access);
+        }
     }
 }
 
@@ -235,6 +254,12 @@ impl WriteTo<v1::auth_blob::Builder<'_>> for AuthBlob {
                 ac_bldr.set_code(&ac.code);
                 ac_bldr.set_pkce(&ac.pkce);
                 ac_bldr.set_client_id(&ac.client_id);
+            }
+            AuthBlob::Oidc(oidc) => {
+                let mut oidc_bldr = bldr.reborrow().init_oidc();
+                oidc_bldr.set_issuer(&oidc.issuer);
+                oidc_bldr.set_id_token(&oidc.id_token);
+                oidc_bldr.set_nonce(&oidc.nonce);
             }
         }
     }

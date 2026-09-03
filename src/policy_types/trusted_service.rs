@@ -22,6 +22,22 @@ pub struct AttrMapping {
     pub attr: Attribute,
 }
 
+/// Pinned OpenID Connect provider configuration for an `api = "oidc"` trusted service.
+/// Mirrors `OidcConfig` in policy.capnp. See spec-OIDC.md "ZPLC configuration".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OidcConfig {
+    pub issuer: String,
+    pub jwks_uri: String,
+    pub client_id: String,
+    pub client_secret: Option<String>, // "" on the wire == None
+    pub scopes: Vec<String>,
+    pub allowed_domains: Vec<String>,
+    pub max_auth_age_seconds: u32, // 0 == unlimited
+    pub allow_offline_access: bool,
+    pub seed_jwks: String,
+    pub jwks_proxy_service: Option<String>, // "" on the wire == None
+}
+
 /// Shadows the cap'n proto `TrustedService` struct.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrustedService {
@@ -29,6 +45,8 @@ pub struct TrustedService {
     pub expiration_seconds: u32,
     pub returns_attrs: Vec<AttrMapping>,
     pub identity_attrs: Vec<String>,
+    /// Populated only for `api = "oidc"` trusted services.
+    pub oidc: Option<OidcConfig>,
 }
 
 /// Decode a trimmed RHS attribute spec into an `Attribute`.
@@ -133,6 +151,78 @@ impl WriteTo<v1::attr_mapping::Builder<'_>> for AttrMapping {
     }
 }
 
+/// Encode an optional string as capnp text: `None` is written as `""`.
+fn opt_to_wire(v: &Option<String>) -> &str {
+    v.as_deref().unwrap_or("")
+}
+
+/// Decode capnp text to an optional string: `""` on the wire means `None`.
+fn wire_to_opt(v: String) -> Option<String> {
+    if v.is_empty() { None } else { Some(v) }
+}
+
+impl TryFrom<v1::oidc_config::Reader<'_>> for OidcConfig {
+    type Error = AttrMappingError;
+
+    fn try_from(reader: v1::oidc_config::Reader<'_>) -> Result<Self, Self::Error> {
+        // Small helper: read a capnp text field, mapping failures to a uniform error.
+        fn text(r: capnp::Result<capnp::text::Reader<'_>>) -> Result<String, AttrMappingError> {
+            r.map_err(|_| read_fail("oidc config"))?
+                .to_string()
+                .map_err(|_| read_fail("oidc config"))
+        }
+        // Read a text list into a Vec<String>.
+        fn text_list(
+            r: capnp::Result<capnp::text_list::Reader<'_>>,
+        ) -> Result<Vec<String>, AttrMappingError> {
+            let mut out = Vec::new();
+            for t in r.map_err(|_| read_fail("oidc config"))?.iter() {
+                out.push(text(t.map(|v| v))?);
+            }
+            Ok(out)
+        }
+
+        Ok(OidcConfig {
+            issuer: text(reader.get_issuer())?,
+            jwks_uri: text(reader.get_jwks_uri())?,
+            client_id: text(reader.get_client_id())?,
+            client_secret: wire_to_opt(text(reader.get_client_secret())?),
+            scopes: text_list(reader.get_scopes())?,
+            allowed_domains: text_list(reader.get_allowed_domains())?,
+            max_auth_age_seconds: reader.get_max_auth_age_seconds(),
+            allow_offline_access: reader.get_allow_offline_access(),
+            seed_jwks: text(reader.get_seed_jwks())?,
+            jwks_proxy_service: wire_to_opt(text(reader.get_jwks_proxy_service())?),
+        })
+    }
+}
+
+impl WriteTo<v1::oidc_config::Builder<'_>> for OidcConfig {
+    fn write_to(&self, bldr: &mut v1::oidc_config::Builder) {
+        bldr.set_issuer(&self.issuer);
+        bldr.set_jwks_uri(&self.jwks_uri);
+        bldr.set_client_id(&self.client_id);
+        bldr.set_client_secret(opt_to_wire(&self.client_secret));
+
+        let mut scopes = bldr.reborrow().init_scopes(self.scopes.len() as u32);
+        for (i, s) in self.scopes.iter().enumerate() {
+            scopes.set(i as u32, s);
+        }
+
+        let mut domains = bldr
+            .reborrow()
+            .init_allowed_domains(self.allowed_domains.len() as u32);
+        for (i, d) in self.allowed_domains.iter().enumerate() {
+            domains.set(i as u32, d);
+        }
+
+        bldr.set_max_auth_age_seconds(self.max_auth_age_seconds);
+        bldr.set_allow_offline_access(self.allow_offline_access);
+        bldr.set_seed_jwks(&self.seed_jwks);
+        bldr.set_jwks_proxy_service(opt_to_wire(&self.jwks_proxy_service));
+    }
+}
+
 impl TryFrom<v1::trusted_service::Reader<'_>> for TrustedService {
     type Error = AttrMappingError;
 
@@ -166,11 +256,21 @@ impl TryFrom<v1::trusted_service::Reader<'_>> for TrustedService {
             );
         }
 
+        // The oidc field is a pointer: absent means "not an OIDC service".
+        let oidc = if reader.has_oidc() {
+            Some(OidcConfig::try_from(
+                reader.get_oidc().map_err(|_| read_fail("oidc config"))?,
+            )?)
+        } else {
+            None
+        };
+
         Ok(TrustedService {
             service_id,
             expiration_seconds,
             returns_attrs,
             identity_attrs,
+            oidc,
         })
     }
 }
@@ -192,6 +292,13 @@ impl WriteTo<v1::trusted_service::Builder<'_>> for TrustedService {
             .init_identity_attrs(self.identity_attrs.len() as u32);
         for (i, id) in self.identity_attrs.iter().enumerate() {
             ids.set(i as u32, id);
+        }
+
+        // Only initialise the oidc pointer when there is a config: an unset pointer
+        // reads back as has_oidc() == false.
+        if let Some(oidc) = &self.oidc {
+            let mut oidc_bldr = bldr.reborrow().init_oidc();
+            oidc.write_to(&mut oidc_bldr);
         }
     }
 }
@@ -337,6 +444,7 @@ mod test {
                 parse_attribute_mapping("groups -> user.groups{}").unwrap(),
             ],
             identity_attrs: vec!["color".to_string()],
+            oidc: None,
         };
         let mut msg = capnp::message::Builder::new_default();
         {
@@ -359,6 +467,7 @@ mod test {
             expiration_seconds: 0,
             returns_attrs: vec![],
             identity_attrs: vec![],
+            oidc: None,
         };
         let mut msg = capnp::message::Builder::new_default();
         {
@@ -368,6 +477,99 @@ mod test {
         let reader: v1::trusted_service::Reader<'_> = msg.get_root_as_reader().unwrap();
         let result = TrustedService::try_from(reader).unwrap();
         assert_eq!(result, original);
+    }
+
+    // --- OidcConfig round-trips (Contract 1) ---
+
+    /// A fully-populated OidcConfig for round-trip tests.
+    fn full_oidc_config() -> OidcConfig {
+        OidcConfig {
+            issuer: "https://accounts.google.com".to_string(),
+            jwks_uri: "https://www.googleapis.com/oauth2/v3/certs".to_string(),
+            client_id: "1234-abc.apps.googleusercontent.com".to_string(),
+            client_secret: Some("shhh".to_string()),
+            scopes: vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+            ],
+            allowed_domains: vec!["example.com".to_string()],
+            max_auth_age_seconds: 86400,
+            allow_offline_access: true,
+            seed_jwks: r#"{"keys":[]}"#.to_string(),
+            jwks_proxy_service: Some("egress-proxy".to_string()),
+        }
+    }
+
+    /// Round-trip a TrustedService through capnp and hand back the decoded copy.
+    fn roundtrip_trusted_service(original: &TrustedService) -> TrustedService {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::trusted_service::Builder<'_> = msg.init_root();
+            original.write_to(&mut root);
+        }
+        let reader: v1::trusted_service::Reader<'_> = msg.get_root_as_reader().unwrap();
+        TrustedService::try_from(reader).unwrap()
+    }
+
+    #[test]
+    fn test_trusted_service_oidc_roundtrip() {
+        let original = TrustedService {
+            service_id: "google".to_string(),
+            expiration_seconds: 3600,
+            returns_attrs: vec![parse_attribute_mapping("email -> user.email").unwrap()],
+            identity_attrs: vec!["sub".to_string()],
+            oidc: Some(full_oidc_config()),
+        };
+        assert_eq!(roundtrip_trusted_service(&original), original);
+    }
+
+    #[test]
+    fn test_trusted_service_oidc_none_roundtrip() {
+        // No OIDC config: the pointer field stays unset and decodes back to None.
+        let original = TrustedService {
+            service_id: "attrfile".to_string(),
+            expiration_seconds: 0,
+            returns_attrs: vec![],
+            identity_attrs: vec![],
+            oidc: None,
+        };
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::trusted_service::Builder<'_> = msg.init_root();
+            original.write_to(&mut root);
+        }
+        let reader: v1::trusted_service::Reader<'_> = msg.get_root_as_reader().unwrap();
+        assert!(!reader.has_oidc());
+        assert_eq!(TrustedService::try_from(reader).unwrap(), original);
+    }
+
+    #[test]
+    fn test_oidc_config_empty_strings_decode_to_none() {
+        // "" on the wire means None for the two optional fields (Contract 1).
+        let mut original = TrustedService {
+            service_id: "google".to_string(),
+            expiration_seconds: 0,
+            returns_attrs: vec![],
+            identity_attrs: vec![],
+            oidc: Some(OidcConfig {
+                client_secret: Some(String::new()),
+                jwks_proxy_service: Some(String::new()),
+                ..full_oidc_config()
+            }),
+        };
+        let decoded = roundtrip_trusted_service(&original);
+        let oidc = decoded.oidc.as_ref().unwrap();
+        assert_eq!(oidc.client_secret, None);
+        assert_eq!(oidc.jwks_proxy_service, None);
+
+        // And a genuinely-None pair survives unchanged.
+        original.oidc = Some(OidcConfig {
+            client_secret: None,
+            jwks_proxy_service: None,
+            ..full_oidc_config()
+        });
+        assert_eq!(roundtrip_trusted_service(&original), original);
     }
 
     // --- old policy with no field 7 decodes as an empty trusted-service list ---
