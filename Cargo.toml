@@ -32,7 +32,7 @@ rcu-crossbeam-epoch = ["rcu/rcu-crossbeam-epoch", "rcu"]
 rcu-mutex-arc = ["rcu/rcu-mutex-arc", "rcu"]
 rcu-rwlock = ["rcu/rcu-rwlock", "rcu"]
 policy = ["capnp", "bytes", "base64", "colored", "flate2", "serde"]
-vsapi = ["capnp", "x25519-dalek"]
+vsapi = ["capnp", "x25519-dalek", "serde"]
 all = ["policy", "vsapi"]
 
 [[bench]]

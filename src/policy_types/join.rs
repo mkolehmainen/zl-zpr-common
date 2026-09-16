@@ -194,6 +194,17 @@ fn write_services(
                     }
                 }
             }
+            // `port` and `port_range` are independent Options here but a union in the
+            // schema, so two of the four Rust states cannot be encoded faithfully:
+            //
+            //   both set -> `init_port_range` re-sets the union discriminant, so only
+            //               the range survives and the port is dropped silently.
+            //   neither  -> no discriminant is ever written. It stays 0, which is the
+            //               `port` group, and the scope decodes as port 0.
+            //
+            // Both are covered by tests below. Making the pair a single enum would make
+            // the first unrepresentable; the second additionally needs a schema member
+            // for "no port" if that is ever a state worth transmitting.
             if let Some(port) = endpoint.port {
                 let mut portnum_bldr = scope_bldr.reborrow().init_port();
                 portnum_bldr.set_port_num(port);
@@ -215,5 +226,332 @@ fn write_services(
                 panic!("service with undefined type/kind"); // programming error
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::policy_types::attribute::Attribute;
+
+    fn write_policy(policy: &JoinPolicy) -> capnp::message::Builder<capnp::message::HeapAllocator> {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::j_policy::Builder<'_> = msg.init_root();
+            policy.write_to(&mut root);
+        }
+        msg
+    }
+
+    fn policy_with_services(provides: Vec<Service>) -> JoinPolicy {
+        JoinPolicy {
+            conditions: vec![],
+            flags: PFlags::default(),
+            provides: Some(provides),
+        }
+    }
+
+    fn service(kind: ServiceType, endpoints: Vec<Scope>) -> Service {
+        Service {
+            id: "svc".to_string(),
+            endpoints,
+            kind,
+        }
+    }
+
+    fn scope(protocol: u8, flag: Option<ScopeFlag>, port: Option<u16>) -> Scope {
+        Scope {
+            protocol,
+            flag,
+            port,
+            port_range: None,
+        }
+    }
+
+    /// Write a policy, then decode its service list back out.
+    fn round_trip_services(provides: Vec<Service>) -> Vec<Service> {
+        let msg = write_policy(&policy_with_services(provides));
+        let reader: v1::j_policy::Reader<'_> = msg.get_root_as_reader().unwrap();
+        reader
+            .get_provides()
+            .unwrap()
+            .iter()
+            .map(|r| Service::try_from(r).unwrap())
+            .collect()
+    }
+
+    fn round_trip_one_scope(s: Scope) -> Scope {
+        let mut decoded = round_trip_services(vec![service(ServiceType::Regular, vec![s])]);
+        decoded.remove(0).endpoints.remove(0)
+    }
+
+    fn written_flags(flags: PFlags) -> Vec<v1::JoinFlag> {
+        let policy = JoinPolicy {
+            conditions: vec![],
+            flags,
+            provides: None,
+        };
+        let msg = write_policy(&policy);
+        let reader: v1::j_policy::Reader<'_> = msg.get_root_as_reader().unwrap();
+        reader
+            .get_flags()
+            .unwrap()
+            .iter()
+            .map(|f| f.unwrap())
+            .collect()
+    }
+
+    // --- Service kinds ---
+
+    #[test]
+    fn test_service_kinds_round_trip() {
+        let kinds = [
+            ServiceType::Regular,
+            ServiceType::Authentication,
+            ServiceType::Visa,
+            ServiceType::BuiltIn,
+            ServiceType::Trusted("attrfile".to_string()),
+        ];
+        let services = kinds
+            .iter()
+            .map(|k| service(k.clone(), vec![]))
+            .collect::<Vec<_>>();
+
+        let decoded = round_trip_services(services);
+
+        assert_eq!(decoded.len(), kinds.len());
+        for (got, want) in decoded.iter().zip(kinds.iter()) {
+            assert_eq!(got.kind, *want);
+            assert_eq!(got.id, "svc");
+        }
+    }
+
+    #[test]
+    fn test_service_preserves_id_and_endpoint_order() {
+        let svc = Service {
+            id: "ordered".to_string(),
+            endpoints: vec![scope(6, None, Some(443)), scope(17, None, Some(53))],
+            kind: ServiceType::Regular,
+        };
+
+        let decoded = round_trip_services(vec![svc]);
+
+        assert_eq!(decoded[0].id, "ordered");
+        assert_eq!(decoded[0].endpoints.len(), 2);
+        assert_eq!(decoded[0].endpoints[0].protocol, 6);
+        assert_eq!(decoded[0].endpoints[0].port, Some(443));
+        assert_eq!(decoded[0].endpoints[1].protocol, 17);
+        assert_eq!(decoded[0].endpoints[1].port, Some(53));
+    }
+
+    /// `Undefined` is the `Default` variant, so a half-built `Service` reaching the
+    /// writer aborts the process rather than erroring.
+    #[test]
+    #[should_panic(expected = "service with undefined type/kind")]
+    fn test_undefined_service_kind_panics_on_write() {
+        write_policy(&policy_with_services(vec![service(
+            ServiceType::default(),
+            vec![],
+        )]));
+    }
+
+    // --- Scope ---
+
+    #[test]
+    fn test_scope_port_round_trips() {
+        let decoded = round_trip_one_scope(scope(6, None, Some(8080)));
+        assert_eq!(decoded.protocol, 6);
+        assert_eq!(decoded.port, Some(8080));
+        assert_eq!(decoded.port_range, None);
+        assert_eq!(decoded.flag, None);
+    }
+
+    #[test]
+    fn test_scope_port_range_round_trips() {
+        let decoded = round_trip_one_scope(Scope {
+            protocol: 17,
+            flag: None,
+            port: None,
+            port_range: Some((1024, 65535)),
+        });
+        assert_eq!(decoded.protocol, 17);
+        assert_eq!(decoded.port, None);
+        assert_eq!(decoded.port_range, Some((1024, 65535)));
+    }
+
+    #[test]
+    fn test_scope_flags_round_trip() {
+        // ScopeFlag is not Clone, so build the expected value alongside the input.
+        for make in [(|| ScopeFlag::UdpOneWay) as fn() -> ScopeFlag, || {
+            ScopeFlag::IcmpRequestReply
+        }] {
+            let decoded = round_trip_one_scope(scope(1, Some(make()), Some(0)));
+            assert_eq!(decoded.flag, Some(make()));
+        }
+        assert_eq!(round_trip_one_scope(scope(1, None, Some(0))).flag, None);
+    }
+
+    /// The wire union has no "neither" state and defaults to `port`, so a scope
+    /// carrying no port at all comes back as port 0 rather than as it went in.
+    #[test]
+    fn test_scope_with_no_port_decodes_as_port_zero() {
+        let decoded = round_trip_one_scope(Scope {
+            protocol: 6,
+            flag: None,
+            port: None,
+            port_range: None,
+        });
+        assert_eq!(decoded.port, Some(0));
+        assert_eq!(decoded.port_range, None);
+    }
+
+    /// `port` and `port_range` are independent `Option`s in Rust but a union on the
+    /// wire. Setting both silently keeps only the range, which is written last.
+    #[test]
+    fn test_scope_with_both_port_and_range_keeps_only_the_range() {
+        let decoded = round_trip_one_scope(Scope {
+            protocol: 6,
+            flag: None,
+            port: Some(443),
+            port_range: Some((100, 200)),
+        });
+        assert_eq!(decoded.port, None);
+        assert_eq!(decoded.port_range, Some((100, 200)));
+    }
+
+    // --- PFlags ---
+
+    #[test]
+    fn test_pflags_constructors() {
+        let node = PFlags::node(false);
+        assert!(node.node && !node.vs && !node.vs_dock);
+
+        let dock = PFlags::node(true);
+        assert!(dock.node && !dock.vs && dock.vs_dock);
+
+        let vs = PFlags::vs();
+        assert!(!vs.node && vs.vs && !vs.vs_dock);
+    }
+
+    #[test]
+    fn test_pflags_or_is_a_union() {
+        let mut flags = PFlags::node(false);
+        flags.or(PFlags::vs());
+        assert!(flags.node && flags.vs && !flags.vs_dock);
+
+        // Already-set flags are never cleared.
+        flags.or(PFlags::default());
+        assert!(flags.node && flags.vs);
+    }
+
+    #[test]
+    fn test_pflags_count_matches_set_flags() {
+        assert_eq!(PFlags::default().count(), 0);
+        assert_eq!(PFlags::node(false).count(), 1);
+        assert_eq!(PFlags::node(true).count(), 2);
+        assert_eq!(
+            PFlags {
+                node: true,
+                vs: true,
+                vs_dock: true
+            }
+            .count(),
+            3
+        );
+    }
+
+    /// The writer sizes the flag list from `count()` and fills it with a separately
+    /// tracked index; every combination must produce exactly the expected list.
+    #[test]
+    fn test_every_flag_combination_is_written() {
+        for (node, vs, vs_dock) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let flags = PFlags { node, vs, vs_dock };
+            let mut expected = Vec::new();
+            if node {
+                expected.push(v1::JoinFlag::Node);
+            }
+            if vs {
+                expected.push(v1::JoinFlag::Vs);
+            }
+            if vs_dock {
+                expected.push(v1::JoinFlag::Vsdock);
+            }
+
+            assert_eq!(
+                written_flags(flags),
+                expected,
+                "flags node={node} vs={vs} vs_dock={vs_dock}"
+            );
+        }
+    }
+
+    // --- JoinPolicy as a whole ---
+
+    #[test]
+    fn test_empty_policy_writes_empty_lists() {
+        let policy = JoinPolicy {
+            conditions: vec![],
+            flags: PFlags::default(),
+            provides: None,
+        };
+        let msg = write_policy(&policy);
+        let reader: v1::j_policy::Reader<'_> = msg.get_root_as_reader().unwrap();
+
+        assert_eq!(reader.get_match().unwrap().len(), 0);
+        assert_eq!(reader.get_provides().unwrap().len(), 0);
+        assert_eq!(reader.get_flags().unwrap().len(), 0);
+    }
+
+    /// `provides: None` and `provides: Some(vec![])` are indistinguishable on the wire.
+    #[test]
+    fn test_absent_and_empty_provides_are_equivalent() {
+        for provides in [None, Some(vec![])] {
+            let policy = JoinPolicy {
+                conditions: vec![],
+                flags: PFlags::default(),
+                provides,
+            };
+            let msg = write_policy(&policy);
+            let reader: v1::j_policy::Reader<'_> = msg.get_root_as_reader().unwrap();
+            assert_eq!(reader.get_provides().unwrap().len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_conditions_are_written_in_order() {
+        let policy = JoinPolicy {
+            conditions: vec![
+                Attribute::tag("user.red").build().unwrap(),
+                Attribute::tuple("user.role")
+                    .single()
+                    .value("admin")
+                    .build()
+                    .unwrap(),
+            ],
+            flags: PFlags::vs(),
+            provides: None,
+        };
+        let msg = write_policy(&policy);
+        let reader: v1::j_policy::Reader<'_> = msg.get_root_as_reader().unwrap();
+        let conds = reader.get_match().unwrap();
+
+        assert_eq!(conds.len(), 2);
+        assert_eq!(
+            conds.get(0).get_key().unwrap().to_str().unwrap(),
+            "user.zpr.tag.red"
+        );
+        assert_eq!(
+            conds.get(1).get_key().unwrap().to_str().unwrap(),
+            "user.role"
+        );
     }
 }
