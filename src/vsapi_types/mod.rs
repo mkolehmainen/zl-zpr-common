@@ -24,7 +24,9 @@ pub use packet::{
     CommFlag, HasFiveTuple, PacketDesc, VsapiFiveTuple, VsapiIpProtocol, vsapi_ip_number,
 };
 pub use param::{Param, ParamValue, pname};
-pub use request::{Claim, ConnectRequest, ConnectType, PublicKey, VSConnectRequest, VisaRequest};
+pub use request::{
+    Claim, ConnectRequest, ConnectType, PublicKey, ReauthRequest, VSConnectRequest, VisaRequest,
+};
 pub use response::{
     Connection, Denied, DenyCode, DisconnectNotice, DisconnectReason, VisaDecision, VisaResponse,
 };

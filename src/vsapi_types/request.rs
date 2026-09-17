@@ -17,6 +17,14 @@ pub struct ConnectRequest {
     pub a2a_dh_public_key: PublicKey,
 }
 
+/// Request to reauthorize an existing connection with fresh credentials.
+/// Mirrors `ReauthRequest` in vs.capnp.
+#[derive(Debug)]
+pub struct ReauthRequest {
+    pub zpr_addr: IpAddr,
+    pub blobs: Vec<AuthBlob>,
+}
+
 /// Wraps the Cap'n Proto `VSConnT` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectType {
@@ -96,6 +104,23 @@ impl TryFrom<v1::connect_request::Reader<'_>> for ConnectRequest {
     }
 }
 
+impl TryFrom<v1::reauth_request::Reader<'_>> for ReauthRequest {
+    type Error = VsapiTypeError;
+
+    fn try_from(reader: v1::reauth_request::Reader<'_>) -> Result<Self, Self::Error> {
+        let zpr_addr = IpAddr::try_from(reader.get_zpr_addr()?)?;
+
+        let mut blobs = Vec::new();
+        let blob_readers = reader.get_blobs()?;
+        for blob_reader in blob_readers.iter() {
+            let blob = AuthBlob::try_from(blob_reader)?;
+            blobs.push(blob);
+        }
+
+        Ok(ReauthRequest { zpr_addr, blobs })
+    }
+}
+
 impl TryFrom<v1::v_s_connect_request::Reader<'_>> for VSConnectRequest {
     type Error = VsapiTypeError;
 
@@ -165,7 +190,7 @@ impl TryFrom<v1::claim::Reader<'_>> for Claim {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vsapi_types::ParamValue;
+    use crate::vsapi_types::{OidcBlob, ParamValue};
     use crate::write_to::WriteTo;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -281,6 +306,102 @@ mod tests {
             ParamValue::StrParam(ref value) if value == "resume"
         ));
         assert!(matches!(params[1].value, ParamValue::U64Param(u64::MAX)));
+    }
+
+    fn make_reauth_request_msg(
+        zpr_addr: IpAddr,
+        oidc_blobs: &[OidcBlob],
+    ) -> capnp::message::Builder<capnp::message::HeapAllocator> {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::reauth_request::Builder<'_> = msg.init_root();
+            {
+                let mut ip_bldr = root.reborrow().init_zpr_addr();
+                zpr_addr.write_to(&mut ip_bldr);
+            }
+            let mut blobs_bldr = root.reborrow().init_blobs(oidc_blobs.len() as u32);
+            for (i, oidc) in oidc_blobs.iter().enumerate() {
+                let mut oidc_bldr = blobs_bldr.reborrow().get(i as u32).init_oidc();
+                oidc_bldr.set_issuer(&oidc.issuer);
+                oidc_bldr.set_id_token(&oidc.id_token);
+                oidc_bldr.set_nonce(&oidc.nonce);
+            }
+        }
+        msg
+    }
+
+    fn read_reauth_request(
+        msg: &capnp::message::Builder<capnp::message::HeapAllocator>,
+    ) -> ReauthRequest {
+        let reader: v1::reauth_request::Reader<'_> = msg.get_root_as_reader().unwrap();
+        ReauthRequest::try_from(reader).unwrap()
+    }
+
+    #[test]
+    fn reauth_request_tryfrom_v4_single_oidc_blob() {
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 20, 30, 40));
+        let oidc = OidcBlob {
+            issuer: "https://accounts.google.com".to_string(),
+            id_token: "eyJhbG...load.sig".to_string(),
+            nonce: "expected-nonce-hash".to_string(),
+        };
+        let msg = make_reauth_request_msg(addr, std::slice::from_ref(&oidc));
+        let req = read_reauth_request(&msg);
+
+        assert_eq!(req.zpr_addr, addr);
+        assert_eq!(req.blobs.len(), 1);
+        match &req.blobs[0] {
+            AuthBlob::Oidc(got) => {
+                assert_eq!(got.issuer, oidc.issuer);
+                assert_eq!(got.id_token, oidc.id_token);
+                assert_eq!(got.nonce, oidc.nonce);
+            }
+            other => panic!("expected AuthBlob::Oidc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reauth_request_tryfrom_v6_multiple_blobs() {
+        let addr: IpAddr = "2001:db8::1".parse().unwrap();
+        let blobs = vec![
+            OidcBlob {
+                issuer: "https://issuer-one.example".to_string(),
+                id_token: "token-one".to_string(),
+                nonce: "nonce-one".to_string(),
+            },
+            OidcBlob {
+                issuer: "https://issuer-two.example".to_string(),
+                id_token: "token-two".to_string(),
+                nonce: "nonce-two".to_string(),
+            },
+        ];
+        let msg = make_reauth_request_msg(addr, &blobs);
+        let req = read_reauth_request(&msg);
+
+        assert_eq!(req.zpr_addr, addr);
+        assert_eq!(req.blobs.len(), 2);
+        for (got, want) in req.blobs.iter().zip(blobs.iter()) {
+            match got {
+                AuthBlob::Oidc(oidc) => {
+                    assert_eq!(oidc.issuer, want.issuer);
+                    assert_eq!(oidc.id_token, want.id_token);
+                    assert_eq!(oidc.nonce, want.nonce);
+                }
+                other => panic!("expected AuthBlob::Oidc, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reauth_request_tryfrom_empty_blobs() {
+        // Blob-count policy is the VS handler's job (zipline#43); the wrapper
+        // accepts an empty list without error.
+        let addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        let msg = make_reauth_request_msg(addr, &[]);
+        let req = read_reauth_request(&msg);
+
+        assert_eq!(req.zpr_addr, addr);
+        assert!(req.blobs.is_empty());
     }
 
     #[test]
