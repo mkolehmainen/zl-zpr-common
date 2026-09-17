@@ -4,7 +4,7 @@ use crate::vsapi::v1;
 use crate::vsapi_types::{
     ApiResponseError, AuthBlob, ChallengeAlg, Claim, CommFlag, ConnectRequest, Connection, DockPep,
     DockPepType, EndpointT, FwdPep, FwdPepStyle, IcmpPep, KeySet, Link, LinkRole, PacketDesc,
-    Param, ParamValue, PublicKey, ServiceDescriptor, ServiceT, SockAddr, TcpUdpPep,
+    Param, ParamValue, PublicKey, ReauthRequest, ServiceDescriptor, ServiceT, SockAddr, TcpUdpPep,
     VSConnectRequest, Visa, VisaOp, VisaType,
 };
 use crate::write_to::WriteTo;
@@ -282,6 +282,18 @@ impl WriteTo<v1::connect_request::Builder<'_>> for ConnectRequest {
         bldr.set_dock_interface(self.dock_interface);
         let mut key_bldr = bldr.reborrow().init_a2a_dh_public_key();
         self.a2a_dh_public_key.write_to(&mut key_bldr);
+    }
+}
+
+impl WriteTo<v1::reauth_request::Builder<'_>> for ReauthRequest {
+    fn write_to(&self, bldr: &mut v1::reauth_request::Builder<'_>) {
+        let mut ip_bldr = bldr.reborrow().init_zpr_addr();
+        self.zpr_addr.write_to(&mut ip_bldr);
+        let mut blobs_bldr = bldr.reborrow().init_blobs(self.blobs.len() as u32);
+        for (i, blob) in self.blobs.iter().enumerate() {
+            let mut blob_bldr = blobs_bldr.reborrow().get(i as u32);
+            blob.write_to(&mut blob_bldr);
+        }
     }
 }
 

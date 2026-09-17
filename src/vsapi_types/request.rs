@@ -17,6 +17,14 @@ pub struct ConnectRequest {
     pub a2a_dh_public_key: PublicKey,
 }
 
+/// Request to reauthorize an existing connection with fresh credentials.
+/// Mirrors `ReauthRequest` in vs.capnp.
+#[derive(Debug)]
+pub struct ReauthRequest {
+    pub zpr_addr: IpAddr,
+    pub blobs: Vec<AuthBlob>,
+}
+
 /// Wraps the Cap'n Proto `VSConnT` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectType {
@@ -93,6 +101,23 @@ impl TryFrom<v1::connect_request::Reader<'_>> for ConnectRequest {
             dock_interface,
             a2a_dh_public_key,
         })
+    }
+}
+
+impl TryFrom<v1::reauth_request::Reader<'_>> for ReauthRequest {
+    type Error = VsapiTypeError;
+
+    fn try_from(reader: v1::reauth_request::Reader<'_>) -> Result<Self, Self::Error> {
+        let zpr_addr = IpAddr::try_from(reader.get_zpr_addr()?)?;
+
+        let mut blobs = Vec::new();
+        let blob_readers = reader.get_blobs()?;
+        for blob_reader in blob_readers.iter() {
+            let blob = AuthBlob::try_from(blob_reader)?;
+            blobs.push(blob);
+        }
+
+        Ok(ReauthRequest { zpr_addr, blobs })
     }
 }
 
