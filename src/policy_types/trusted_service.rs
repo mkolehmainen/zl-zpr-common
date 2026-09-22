@@ -239,6 +239,33 @@ impl WriteTo<v1::oidc_config::Builder<'_>> for OidcConfig {
     }
 }
 
+impl TryFrom<v1::attr_query_config::Reader<'_>> for AttrQueryConfig {
+    type Error = AttrMappingError;
+
+    fn try_from(reader: v1::attr_query_config::Reader<'_>) -> Result<Self, Self::Error> {
+        // Small helper: read a capnp text field, mapping failures to a uniform error.
+        fn text(r: capnp::Result<capnp::text::Reader<'_>>) -> Result<String, AttrMappingError> {
+            r.map_err(|_| read_fail("attr query config"))?
+                .to_string()
+                .map_err(|_| read_fail("attr query config"))
+        }
+
+        Ok(AttrQueryConfig {
+            url: text(reader.get_url())?,
+            ca_cert_pem: wire_to_opt(text(reader.get_ca_cert_pem())?),
+            timeout_seconds: reader.get_timeout_seconds(),
+        })
+    }
+}
+
+impl WriteTo<v1::attr_query_config::Builder<'_>> for AttrQueryConfig {
+    fn write_to(&self, bldr: &mut v1::attr_query_config::Builder) {
+        bldr.set_url(&self.url);
+        bldr.set_ca_cert_pem(opt_to_wire(&self.ca_cert_pem));
+        bldr.set_timeout_seconds(self.timeout_seconds);
+    }
+}
+
 impl TryFrom<v1::trusted_service::Reader<'_>> for TrustedService {
     type Error = AttrMappingError;
 
@@ -281,13 +308,24 @@ impl TryFrom<v1::trusted_service::Reader<'_>> for TrustedService {
             None
         };
 
+        // The attr_query field is a pointer: absent means "not a zpr-attr/1 service".
+        let attr_query = if reader.has_attr_query() {
+            Some(AttrQueryConfig::try_from(
+                reader
+                    .get_attr_query()
+                    .map_err(|_| read_fail("attr query config"))?,
+            )?)
+        } else {
+            None
+        };
+
         Ok(TrustedService {
             service_id,
             expiration_seconds,
             returns_attrs,
             identity_attrs,
             oidc,
-            attr_query: None,
+            attr_query,
         })
     }
 }
@@ -316,6 +354,13 @@ impl WriteTo<v1::trusted_service::Builder<'_>> for TrustedService {
         if let Some(oidc) = &self.oidc {
             let mut oidc_bldr = bldr.reborrow().init_oidc();
             oidc.write_to(&mut oidc_bldr);
+        }
+
+        // Only initialise the attr_query pointer when there is a config: an unset pointer
+        // reads back as has_attr_query() == false.
+        if let Some(attr_query) = &self.attr_query {
+            let mut aq_bldr = bldr.reborrow().init_attr_query();
+            attr_query.write_to(&mut aq_bldr);
         }
     }
 }
