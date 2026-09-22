@@ -15,5 +15,7 @@ pub use error::{AttrMappingError, AttributeError, PolicyTypeError};
 pub use join::{JoinPolicy, PFlags, Scope, ScopeFlag, Service, ServiceType};
 pub use policy_bundle::{PolicyBundle, PolicyContainerBytes};
 pub use topology::{NetAddr, NetworkHost, Peering};
-pub use trusted_service::{AttrMapping, OidcConfig, TrustedService, parse_attribute_mapping};
+pub use trusted_service::{
+    AttrMapping, AttrQueryConfig, OidcConfig, TrustedService, parse_attribute_mapping,
+};
 pub use writer::write_attributes;
