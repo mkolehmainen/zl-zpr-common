@@ -38,6 +38,20 @@ pub struct OidcConfig {
     pub jwks_proxy_service: Option<String>, // "" on the wire == None
 }
 
+/// Pinned attribute-service configuration for an `api = "zpr-attr/1"` trusted service.
+/// Mirrors `AttrQueryConfig` in policy.capnp. The bearer token the visa service presents
+/// is deliberately NOT here: policy is signed and distributed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AttrQueryConfig {
+    /// https base URL; the visa service appends `/query` and `/schema`.
+    pub url: String,
+    /// PEM certificate block(s) to trust for this service; `""` on the wire == `None`
+    /// (system roots).
+    pub ca_cert_pem: Option<String>,
+    /// Whole-request timeout; the compiler defaults 5 and caps 30.
+    pub timeout_seconds: u32,
+}
+
 /// Shadows the cap'n proto `TrustedService` struct.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrustedService {
@@ -47,6 +61,8 @@ pub struct TrustedService {
     pub identity_attrs: Vec<String>,
     /// Populated only for `api = "oidc"` trusted services.
     pub oidc: Option<OidcConfig>,
+    /// Populated only for `api = "zpr-attr/1"` trusted services.
+    pub attr_query: Option<AttrQueryConfig>,
 }
 
 /// Decode a trimmed RHS attribute spec into an `Attribute`.
@@ -223,6 +239,33 @@ impl WriteTo<v1::oidc_config::Builder<'_>> for OidcConfig {
     }
 }
 
+impl TryFrom<v1::attr_query_config::Reader<'_>> for AttrQueryConfig {
+    type Error = AttrMappingError;
+
+    fn try_from(reader: v1::attr_query_config::Reader<'_>) -> Result<Self, Self::Error> {
+        // Small helper: read a capnp text field, mapping failures to a uniform error.
+        fn text(r: capnp::Result<capnp::text::Reader<'_>>) -> Result<String, AttrMappingError> {
+            r.map_err(|_| read_fail("attr query config"))?
+                .to_string()
+                .map_err(|_| read_fail("attr query config"))
+        }
+
+        Ok(AttrQueryConfig {
+            url: text(reader.get_url())?,
+            ca_cert_pem: wire_to_opt(text(reader.get_ca_cert_pem())?),
+            timeout_seconds: reader.get_timeout_seconds(),
+        })
+    }
+}
+
+impl WriteTo<v1::attr_query_config::Builder<'_>> for AttrQueryConfig {
+    fn write_to(&self, bldr: &mut v1::attr_query_config::Builder) {
+        bldr.set_url(&self.url);
+        bldr.set_ca_cert_pem(opt_to_wire(&self.ca_cert_pem));
+        bldr.set_timeout_seconds(self.timeout_seconds);
+    }
+}
+
 impl TryFrom<v1::trusted_service::Reader<'_>> for TrustedService {
     type Error = AttrMappingError;
 
@@ -265,12 +308,24 @@ impl TryFrom<v1::trusted_service::Reader<'_>> for TrustedService {
             None
         };
 
+        // The attr_query field is a pointer: absent means "not a zpr-attr/1 service".
+        let attr_query = if reader.has_attr_query() {
+            Some(AttrQueryConfig::try_from(
+                reader
+                    .get_attr_query()
+                    .map_err(|_| read_fail("attr query config"))?,
+            )?)
+        } else {
+            None
+        };
+
         Ok(TrustedService {
             service_id,
             expiration_seconds,
             returns_attrs,
             identity_attrs,
             oidc,
+            attr_query,
         })
     }
 }
@@ -299,6 +354,13 @@ impl WriteTo<v1::trusted_service::Builder<'_>> for TrustedService {
         if let Some(oidc) = &self.oidc {
             let mut oidc_bldr = bldr.reborrow().init_oidc();
             oidc.write_to(&mut oidc_bldr);
+        }
+
+        // Only initialise the attr_query pointer when there is a config: an unset pointer
+        // reads back as has_attr_query() == false.
+        if let Some(attr_query) = &self.attr_query {
+            let mut aq_bldr = bldr.reborrow().init_attr_query();
+            attr_query.write_to(&mut aq_bldr);
         }
     }
 }
@@ -445,6 +507,7 @@ mod test {
             ],
             identity_attrs: vec!["color".to_string()],
             oidc: None,
+            attr_query: None,
         };
         let mut msg = capnp::message::Builder::new_default();
         {
@@ -468,6 +531,7 @@ mod test {
             returns_attrs: vec![],
             identity_attrs: vec![],
             oidc: None,
+            attr_query: None,
         };
         let mut msg = capnp::message::Builder::new_default();
         {
@@ -520,6 +584,7 @@ mod test {
             returns_attrs: vec![parse_attribute_mapping("email -> user.email").unwrap()],
             identity_attrs: vec!["sub".to_string()],
             oidc: Some(full_oidc_config()),
+            attr_query: None,
         };
         assert_eq!(roundtrip_trusted_service(&original), original);
     }
@@ -533,6 +598,7 @@ mod test {
             returns_attrs: vec![],
             identity_attrs: vec![],
             oidc: None,
+            attr_query: None,
         };
         let mut msg = capnp::message::Builder::new_default();
         {
@@ -557,6 +623,7 @@ mod test {
                 jwks_proxy_service: Some(String::new()),
                 ..full_oidc_config()
             }),
+            attr_query: None,
         };
         let decoded = roundtrip_trusted_service(&original);
         let oidc = decoded.oidc.as_ref().unwrap();
@@ -568,6 +635,78 @@ mod test {
             client_secret: None,
             jwks_proxy_service: None,
             ..full_oidc_config()
+        });
+        assert_eq!(roundtrip_trusted_service(&original), original);
+    }
+
+    // --- AttrQueryConfig round-trips (zipline#75, mirrors the OIDC ones) ---
+
+    /// A fully-populated AttrQueryConfig for round-trip tests.
+    fn full_attr_query_config() -> AttrQueryConfig {
+        AttrQueryConfig {
+            url: "https://attrs.example.com/zpr".to_string(),
+            ca_cert_pem: Some(
+                "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".to_string(),
+            ),
+            timeout_seconds: 15,
+        }
+    }
+
+    #[test]
+    fn test_trusted_service_attr_query_roundtrip() {
+        let original = TrustedService {
+            service_id: "hr-attrs".to_string(),
+            expiration_seconds: 3600,
+            returns_attrs: vec![parse_attribute_mapping("dept -> user.dept").unwrap()],
+            identity_attrs: vec!["email".to_string()],
+            oidc: None,
+            attr_query: Some(full_attr_query_config()),
+        };
+        assert_eq!(roundtrip_trusted_service(&original), original);
+    }
+
+    #[test]
+    fn test_trusted_service_attr_query_none_roundtrip() {
+        // No attr-query config: the pointer field stays unset and decodes back to None.
+        let original = TrustedService {
+            service_id: "attrfile".to_string(),
+            expiration_seconds: 0,
+            returns_attrs: vec![],
+            identity_attrs: vec![],
+            oidc: None,
+            attr_query: None,
+        };
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::trusted_service::Builder<'_> = msg.init_root();
+            original.write_to(&mut root);
+        }
+        let reader: v1::trusted_service::Reader<'_> = msg.get_root_as_reader().unwrap();
+        assert!(!reader.has_attr_query());
+        assert_eq!(TrustedService::try_from(reader).unwrap(), original);
+    }
+
+    #[test]
+    fn test_attr_query_empty_ca_cert_decodes_to_none() {
+        // "" on the wire means None for ca_cert_pem (spec: "" == system roots).
+        let mut original = TrustedService {
+            service_id: "hr-attrs".to_string(),
+            expiration_seconds: 0,
+            returns_attrs: vec![],
+            identity_attrs: vec![],
+            oidc: None,
+            attr_query: Some(AttrQueryConfig {
+                ca_cert_pem: Some(String::new()),
+                ..full_attr_query_config()
+            }),
+        };
+        let decoded = roundtrip_trusted_service(&original);
+        assert_eq!(decoded.attr_query.as_ref().unwrap().ca_cert_pem, None);
+
+        // And a genuinely-None ca_cert_pem survives unchanged.
+        original.attr_query = Some(AttrQueryConfig {
+            ca_cert_pem: None,
+            ..full_attr_query_config()
         });
         assert_eq!(roundtrip_trusted_service(&original), original);
     }
