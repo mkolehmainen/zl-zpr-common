@@ -261,7 +261,7 @@ mod tests {
 
     /// The error codes that map 1:1. `UnknownStatusCode` and `Fail` are handled
     /// separately by `error_code_lossy_variants_collapse_to_internal`.
-    const ERROR_CODE_PAIRS: [(v1::ErrorCode, ErrorCode); 10] = [
+    const ERROR_CODE_PAIRS: [(v1::ErrorCode, ErrorCode); 11] = [
         (v1::ErrorCode::Internal, ErrorCode::Internal),
         (v1::ErrorCode::AuthRequired, ErrorCode::AuthRequired),
         (v1::ErrorCode::InvalidOperation, ErrorCode::InvalidOperation),
@@ -275,6 +275,7 @@ mod tests {
         ),
         (v1::ErrorCode::AuthError, ErrorCode::AuthError),
         (v1::ErrorCode::ParamError, ErrorCode::ParamError),
+        (v1::ErrorCode::PolicyDenied, ErrorCode::PolicyDenied),
     ];
 
     /// Never called. Exists so that adding a variant to one of the enums above
@@ -310,6 +311,7 @@ mod tests {
             | ErrorCode::TemporarilyUnavailable
             | ErrorCode::AuthError
             | ErrorCode::ParamError
+            | ErrorCode::PolicyDenied
             | ErrorCode::UnknownStatusCode
             | ErrorCode::Fail => {}
         }
