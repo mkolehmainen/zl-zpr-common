@@ -354,8 +354,9 @@ impl TryFrom<v1::dock_pep::Reader<'_>> for DockPep {
             }
             v1::dock_pep::Which::Icmp(icmp_pep_result) => {
                 let icmp_pep_reader = icmp_pep_result?;
+                // Packed as `type << 8 | code` by the writer; unpack both bytes.
                 let type_code = icmp_pep_reader.get_icmp_type_code();
-                let icmp_pep = IcmpPep::new(type_code as u8, 0);
+                let icmp_pep = IcmpPep::new((type_code >> 8) as u8, type_code as u8);
                 DockPepType::ICMP(icmp_pep)
             }
         };
@@ -384,5 +385,171 @@ impl TryFrom<v1::key_set::Reader<'_>> for KeySet {
             ingress_key,
             egress_key,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::write_to::WriteTo;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    const SRC_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    const DST_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    fn dock_pep(source_addr: IpAddr, dest_addr: IpAddr, pep: DockPepType) -> DockPep {
+        DockPep {
+            source_addr,
+            dest_addr,
+            session_key: KeySet::new(&[1, 2, 3], &[4, 5, 6]),
+            pep,
+        }
+    }
+
+    /// Encode a DockPep with the production writer and decode it with the
+    /// production reader.
+    fn round_trip(pep: &DockPep) -> DockPep {
+        let mut msg = capnp::message::Builder::new_default();
+        {
+            let mut root: v1::dock_pep::Builder<'_> = msg.init_root();
+            pep.write_to(&mut root);
+        }
+        let reader: v1::dock_pep::Reader<'_> = msg.get_root_as_reader().unwrap();
+        DockPep::try_from(reader).expect("a written dock pep must decode")
+    }
+
+    // --- ICMP ---
+
+    /// The wire field is a single `UInt16` packed as `type << 8 | code`, so both
+    /// bytes must survive the trip.
+    #[test]
+    fn test_icmp_pep_round_trips_type_and_code() {
+        // (type, code) pairs, with the meaning of the real ICMP ones noted.
+        let cases = [
+            (0u8, 0u8), // echo reply
+            (8, 0),     // echo request
+            (3, 1),     // destination unreachable / host unreachable
+            (11, 0),    // time exceeded
+            (5, 3),     // redirect
+            (255, 255), // both bytes fully set
+        ];
+
+        for (icmp_type, icmp_code) in cases {
+            let original = dock_pep(
+                SRC_V4,
+                DST_V4,
+                DockPepType::ICMP(IcmpPep::new(icmp_type, icmp_code)),
+            );
+
+            let decoded = round_trip(&original);
+
+            assert_eq!(
+                decoded, original,
+                "ICMP type {icmp_type} code {icmp_code} did not survive the round trip"
+            );
+        }
+    }
+
+    /// The ICMP type and code are what the lookup table matches on, so a decode
+    /// error here mismatches traffic rather than merely displaying it wrong.
+    #[test]
+    fn test_icmp_five_tuple_carries_type_and_code() {
+        let pep = dock_pep(SRC_V4, DST_V4, DockPepType::ICMP(IcmpPep::new(8, 0)));
+
+        let ft = round_trip(&pep).get_five_tuple();
+
+        assert_eq!(ft.l4_protocol, vsapi_ip_number::ICMP);
+        assert_eq!(ft.source_port, 8, "ICMP type belongs in source_port");
+        assert_eq!(ft.dest_port, 0, "ICMP code belongs in dest_port");
+    }
+
+    #[test]
+    fn test_icmp_over_ipv6_uses_the_v6_protocol_number() {
+        let src = IpAddr::V6(Ipv6Addr::new(0xfd5a, 0x5052, 0, 0, 0, 0, 0, 1));
+        let dst = IpAddr::V6(Ipv6Addr::new(0xfd5a, 0x5052, 0, 0, 0, 0, 0, 2));
+        let pep = dock_pep(src, dst, DockPepType::ICMP(IcmpPep::new(128, 0)));
+
+        let decoded = round_trip(&pep);
+        let ft = decoded.get_five_tuple();
+
+        assert_eq!(decoded, pep);
+        assert_eq!(ft.l4_protocol, vsapi_ip_number::IPV6_ICMP);
+        assert_eq!(ft.l3_type, L3Type::Ipv6);
+    }
+
+    // --- TCP / UDP ---
+
+    #[test]
+    fn test_tcp_and_udp_peps_round_trip_every_endpoint() {
+        for endpoint in [EndpointT::Any, EndpointT::Server, EndpointT::Client] {
+            let tcp_pep = TcpUdpPep::new(4242, 443, endpoint.clone());
+            let tcp = dock_pep(SRC_V4, DST_V4, DockPepType::TCP(tcp_pep.clone()));
+            assert_eq!(round_trip(&tcp), tcp, "TCP with endpoint {endpoint:?}");
+
+            let udp = dock_pep(SRC_V4, DST_V4, DockPepType::UDP(tcp_pep));
+            assert_eq!(round_trip(&udp), udp, "UDP with endpoint {endpoint:?}");
+        }
+    }
+
+    /// TCP and UDP share a wire struct but must not collapse into one another.
+    #[test]
+    fn test_tcp_and_udp_stay_distinct() {
+        let pep = TcpUdpPep::new(1, 2, EndpointT::Any);
+        let tcp = round_trip(&dock_pep(SRC_V4, DST_V4, DockPepType::TCP(pep.clone())));
+        let udp = round_trip(&dock_pep(SRC_V4, DST_V4, DockPepType::UDP(pep)));
+
+        assert!(matches!(tcp.pep, DockPepType::TCP(_)));
+        assert!(matches!(udp.pep, DockPepType::UDP(_)));
+        assert_eq!(tcp.get_five_tuple().l4_protocol, vsapi_ip_number::TCP);
+        assert_eq!(udp.get_five_tuple().l4_protocol, vsapi_ip_number::UDP);
+    }
+
+    #[test]
+    fn test_tcp_five_tuple_carries_ports_and_addrs() {
+        let pep = dock_pep(
+            SRC_V4,
+            DST_V4,
+            DockPepType::TCP(TcpUdpPep::new(4242, 443, EndpointT::Server)),
+        );
+
+        let ft = round_trip(&pep).get_five_tuple();
+
+        assert_eq!(ft.source_addr, SRC_V4);
+        assert_eq!(ft.dest_addr, DST_V4);
+        assert_eq!(ft.l3_type, L3Type::Ipv4);
+        assert_eq!(ft.source_port, 4242);
+        assert_eq!(ft.dest_port, 443);
+    }
+
+    // --- KeySet ---
+
+    #[test]
+    fn test_session_keys_round_trip() {
+        let pep = dock_pep(
+            SRC_V4,
+            DST_V4,
+            DockPepType::TCP(TcpUdpPep::new(1, 2, EndpointT::Any)),
+        );
+
+        let decoded = round_trip(&pep);
+
+        assert_eq!(decoded.session_key.ingress_key, vec![1, 2, 3]);
+        assert_eq!(decoded.session_key.egress_key, vec![4, 5, 6]);
+        assert_eq!(decoded.session_key.format, KeyFormat::ZprKF01);
+    }
+
+    #[test]
+    fn test_empty_session_keys_round_trip() {
+        let mut pep = dock_pep(
+            SRC_V4,
+            DST_V4,
+            DockPepType::TCP(TcpUdpPep::new(1, 2, EndpointT::Any)),
+        );
+        pep.session_key = KeySet::new(&[], &[]);
+
+        let decoded = round_trip(&pep);
+
+        assert!(decoded.session_key.ingress_key.is_empty());
+        assert!(decoded.session_key.egress_key.is_empty());
     }
 }

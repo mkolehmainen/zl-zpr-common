@@ -65,12 +65,15 @@ pub struct DisconnectNotice {
 }
 
 impl Connection {
+    /// An `auth_expires` before the unix epoch cannot be represented on the wire
+    /// (`authExpires` is a `UInt64` of seconds), so it collapses to 0 — already
+    /// expired. Failing closed beats panicking on a bad upstream clock.
     pub fn new(zpr_addr: IpAddr, auth_expires: SystemTime) -> Self {
         Self {
             zpr_addr,
             auth_expires: auth_expires
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
         }
     }
@@ -216,5 +219,224 @@ impl From<v1::ErrorCode> for ErrorCode {
             v1::ErrorCode::ParamError => ErrorCode::ParamError,
             v1::ErrorCode::PolicyDenied => ErrorCode::PolicyDenied,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    /// Every 1:1 pairing between the capnp deny code and our own.
+    ///
+    /// Asserted as explicit pairs rather than only round-tripped: a round trip
+    /// still succeeds if two variants are swapped in *both* directions, which is
+    /// exactly the copy/paste mistake these tables invite.
+    const DENY_CODE_PAIRS: [(v1::VisaDenyCode, DenyCode); 9] = [
+        (v1::VisaDenyCode::NoReason, DenyCode::NoReason),
+        (v1::VisaDenyCode::NoMatch, DenyCode::NoMatch),
+        (v1::VisaDenyCode::Denied, DenyCode::Denied),
+        (v1::VisaDenyCode::SourceNotFound, DenyCode::SourceNotFound),
+        (v1::VisaDenyCode::DestNotFound, DenyCode::DestNotFound),
+        (v1::VisaDenyCode::SourceAuthError, DenyCode::SourceAuthError),
+        (v1::VisaDenyCode::DestAuthError, DenyCode::DestAuthError),
+        (v1::VisaDenyCode::QuotaExceeded, DenyCode::QuotaExceeded),
+        (v1::VisaDenyCode::NoRoute, DenyCode::NoRoute),
+    ];
+
+    const DISCONNECT_REASON_PAIRS: [(v1::DisconnectReason, DisconnectReason); 5] = [
+        (
+            v1::DisconnectReason::RemoteDisconnect,
+            DisconnectReason::RemoteDisconnect,
+        ),
+        (v1::DisconnectReason::Timeout, DisconnectReason::Timeout),
+        (v1::DisconnectReason::LinkError, DisconnectReason::LinkError),
+        (
+            v1::DisconnectReason::NodeShutdown,
+            DisconnectReason::NodeShutdown,
+        ),
+        (v1::DisconnectReason::Admin, DisconnectReason::Admin),
+    ];
+
+    /// The error codes that map 1:1. `UnknownStatusCode` and `Fail` are handled
+    /// separately by `error_code_lossy_variants_collapse_to_internal`.
+    const ERROR_CODE_PAIRS: [(v1::ErrorCode, ErrorCode); 10] = [
+        (v1::ErrorCode::Internal, ErrorCode::Internal),
+        (v1::ErrorCode::AuthRequired, ErrorCode::AuthRequired),
+        (v1::ErrorCode::InvalidOperation, ErrorCode::InvalidOperation),
+        (v1::ErrorCode::OutOfSync, ErrorCode::OutOfSync),
+        (v1::ErrorCode::NotFound, ErrorCode::NotFound),
+        (v1::ErrorCode::InvalidSignature, ErrorCode::InvalidSignature),
+        (v1::ErrorCode::QuotaExceeded, ErrorCode::QuotaExceeded),
+        (
+            v1::ErrorCode::TemporarilyUnavailable,
+            ErrorCode::TemporarilyUnavailable,
+        ),
+        (v1::ErrorCode::AuthError, ErrorCode::AuthError),
+        (v1::ErrorCode::ParamError, ErrorCode::ParamError),
+    ];
+
+    /// Never called. Exists so that adding a variant to one of the enums above
+    /// fails to compile until the matching table is extended.
+    #[allow(dead_code)]
+    fn exhaustiveness_guard(deny: &DenyCode, reason: &DisconnectReason, err: &ErrorCode) {
+        match deny {
+            DenyCode::NoReason
+            | DenyCode::NoMatch
+            | DenyCode::Denied
+            | DenyCode::SourceNotFound
+            | DenyCode::DestNotFound
+            | DenyCode::SourceAuthError
+            | DenyCode::DestAuthError
+            | DenyCode::QuotaExceeded
+            | DenyCode::NoRoute => {}
+        }
+        match reason {
+            DisconnectReason::RemoteDisconnect
+            | DisconnectReason::Timeout
+            | DisconnectReason::LinkError
+            | DisconnectReason::NodeShutdown
+            | DisconnectReason::Admin => {}
+        }
+        match err {
+            ErrorCode::Internal
+            | ErrorCode::AuthRequired
+            | ErrorCode::InvalidOperation
+            | ErrorCode::OutOfSync
+            | ErrorCode::NotFound
+            | ErrorCode::InvalidSignature
+            | ErrorCode::QuotaExceeded
+            | ErrorCode::TemporarilyUnavailable
+            | ErrorCode::AuthError
+            | ErrorCode::ParamError
+            | ErrorCode::UnknownStatusCode
+            | ErrorCode::Fail => {}
+        }
+    }
+
+    #[test]
+    fn deny_code_maps_each_variant_in_both_directions() {
+        for (capnp_code, native_code) in DENY_CODE_PAIRS {
+            assert_eq!(
+                DenyCode::from(capnp_code),
+                native_code,
+                "decoding {capnp_code:?}"
+            );
+            assert_eq!(
+                v1::VisaDenyCode::from(native_code),
+                capnp_code,
+                "encoding {capnp_code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disconnect_reason_maps_each_variant_in_both_directions() {
+        for (capnp_reason, native_reason) in DISCONNECT_REASON_PAIRS {
+            assert_eq!(
+                DisconnectReason::from(capnp_reason),
+                native_reason,
+                "decoding {capnp_reason:?}"
+            );
+            assert_eq!(
+                v1::DisconnectReason::from(native_reason),
+                capnp_reason,
+                "encoding {capnp_reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_code_maps_each_shared_variant_in_both_directions() {
+        for (capnp_code, native_code) in ERROR_CODE_PAIRS {
+            assert_eq!(
+                ErrorCode::from(capnp_code),
+                native_code,
+                "decoding {capnp_code:?}"
+            );
+            let encoded: v1::ErrorCode = native_code.into();
+            assert_eq!(encoded, capnp_code, "encoding {capnp_code:?}");
+        }
+    }
+
+    /// `UnknownStatusCode` and `Fail` have no capnp counterpart, so they widen to
+    /// `Internal` on the way out and cannot round-trip back.
+    #[test]
+    fn error_code_lossy_variants_collapse_to_internal() {
+        for lossy in [ErrorCode::UnknownStatusCode, ErrorCode::Fail] {
+            let encoded: v1::ErrorCode = lossy.clone().into();
+            assert_eq!(encoded, v1::ErrorCode::Internal, "encoding {lossy:?}");
+            assert_ne!(ErrorCode::from(encoded), lossy, "{lossy:?} is not 1:1");
+        }
+    }
+
+    #[test]
+    fn connection_new_converts_expiry_to_unix_seconds() {
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let conn = Connection::new(addr, expires);
+
+        assert_eq!(conn.zpr_addr, addr);
+        assert_eq!(conn.auth_expires, 1_700_000_000);
+    }
+
+    /// Sub-second precision is dropped rather than rounded up.
+    #[test]
+    fn connection_new_truncates_sub_second_expiry() {
+        let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_millis(1_999);
+
+        let conn = Connection::new(addr, expires);
+
+        assert_eq!(conn.auth_expires, 1);
+    }
+
+    /// A pre-epoch expiry is unrepresentable on the wire. It must fail closed to
+    /// "already expired" rather than panic the caller.
+    #[test]
+    fn connection_new_treats_pre_epoch_expiry_as_expired() {
+        let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let expires = SystemTime::UNIX_EPOCH - Duration::from_secs(60);
+
+        let conn = Connection::new(addr, expires);
+
+        assert_eq!(conn.auth_expires, 0);
+    }
+
+    #[test]
+    fn visa_decision_passes_denial_through() {
+        let denied = Denied::new(DenyCode::QuotaExceeded, Some("over limit".to_string()));
+        let response = VisaResponse::Denied(denied);
+
+        let decision = VisaDecision::try_from(response).expect("denial is a valid decision");
+
+        match decision {
+            VisaDecision::Denied(d) => {
+                assert_eq!(d.code, DenyCode::QuotaExceeded);
+                assert_eq!(d.reason.as_deref(), Some("over limit"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    /// An error response is not a decision at all; it must surface as `Err`.
+    #[test]
+    fn visa_decision_rejects_error_response() {
+        let api_err = ApiResponseError::new(ErrorCode::AuthRequired, "need auth", 30);
+        let response = VisaResponse::VsapiTypeError(api_err);
+
+        let err = VisaDecision::try_from(response).expect_err("error is not a decision");
+
+        assert_eq!(err.code, ErrorCode::AuthRequired);
+        assert_eq!(err.message, "need auth");
+        assert_eq!(err.retry_in, 30);
+    }
+
+    #[test]
+    fn deny_code_and_disconnect_reason_display_as_variant_names() {
+        assert_eq!(DenyCode::SourceAuthError.to_string(), "SourceAuthError");
+        assert_eq!(DisconnectReason::NodeShutdown.to_string(), "NodeShutdown");
     }
 }

@@ -46,7 +46,7 @@ impl std::fmt::Display for ApiResponseError {
 }
 
 /// Denial code, match the codes in vs.capnp, except for Fail and UnknownStatusCode
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ErrorCode {
     Internal,
     AuthRequired,

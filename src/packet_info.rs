@@ -1,4 +1,5 @@
 use open_enum::open_enum;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
@@ -73,19 +74,9 @@ pub const KM_ID_NULL: KmId = 0;
 /// ZPR actor packet L3 type (RFC 6.5 § 6.3.11)
 #[open_enum]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    FromBytes,
-    Hash,
-    IntoBytes,
-    Immutable,
-    KnownLayout,
-    Unaligned,
-    Serialize,
-    Deserialize,
+    Copy, Clone, Debug, Default, FromBytes, Hash, IntoBytes, Immutable, KnownLayout, Unaligned,
 )]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[repr(u8)]
 pub enum L3Type {
     Ipv4 = 4,
